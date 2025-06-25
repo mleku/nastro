@@ -98,5 +98,5 @@ func TestConcurrency(t *testing.T) {
 }
 
 func TestInterface(t *testing.T) {
-	var _ nastro.Store = &Ephemeral{}
+	var _ nastro.Store = &Store{}
 }

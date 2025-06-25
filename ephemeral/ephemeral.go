@@ -17,7 +17,7 @@ import (
 //
 // Due to its expected small capacity (e.g. 1000 events) and in-memory nature,
 // it does not impose query result limits beyond what the Nostr filter itself specifies
-type Ephemeral struct {
+type Store struct {
 	mu       sync.RWMutex
 	events   []*nostr.Event
 	write    int
@@ -25,20 +25,20 @@ type Ephemeral struct {
 }
 
 // New creates an ephemeral store with the provided capacity.
-func New(capacity int) *Ephemeral {
-	return &Ephemeral{
+func New(capacity int) *Store {
+	return &Store{
 		events:   make([]*nostr.Event, capacity),
 		capacity: capacity,
 	}
 }
 
 // Size returns the number of events currently stored.
-func (e *Ephemeral) Size() int {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+func (s *Store) Size() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	var size int
-	for _, event := range e.events {
+	for _, event := range s.events {
 		if event != nil {
 			size++
 		}
@@ -47,56 +47,56 @@ func (e *Ephemeral) Size() int {
 }
 
 // Capacity returns the maximum number of events that can be stored.
-func (e *Ephemeral) Capacity() int {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.capacity
+func (s *Store) Capacity() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.capacity
 }
 
 // Resize the ephemeral store with the provided capacity.
-func (e *Ephemeral) Resize(capacity int) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *Store) Resize(capacity int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	e.write = 0
-	e.capacity = capacity
+	s.write = 0
+	s.capacity = capacity
 	events := make([]*nostr.Event, capacity)
 
-	for _, event := range e.events {
+	for _, event := range s.events {
 		if event != nil {
-			events[e.write] = event
-			e.write++
+			events[s.write] = event
+			s.write++
 
-			if e.write >= capacity {
+			if s.write >= capacity {
 				// reached capacity
 				break
 			}
 		}
 	}
-	e.events = events
+	s.events = events
 }
 
-func (e *Ephemeral) Save(ctx context.Context, event *nostr.Event) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *Store) Save(ctx context.Context, event *nostr.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	e.events[e.write] = event
-	e.write = (e.write + 1) % e.capacity
+	s.events[s.write] = event
+	s.write = (s.write + 1) % s.capacity
 	return nil
 }
 
-func (e *Ephemeral) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	for i, stored := range e.events {
+	for i, stored := range s.events {
 		if stored == nil {
 			continue
 		}
 
 		if isReplacementCandidate(event, stored) {
 			if event.CreatedAt > stored.CreatedAt {
-				e.events[i] = event
+				s.events[i] = event
 				return true, nil
 			}
 			return false, nil
@@ -104,8 +104,8 @@ func (e *Ephemeral) Replace(ctx context.Context, event *nostr.Event) (bool, erro
 	}
 
 	// no candidates found, save
-	e.events[e.write] = event
-	e.write = (e.write + 1) % e.capacity
+	s.events[s.write] = event
+	s.write = (s.write + 1) % s.capacity
 	return true, nil
 }
 
@@ -125,30 +125,30 @@ func isReplacementCandidate(e1, e2 *nostr.Event) bool {
 	}
 }
 
-func (e *Ephemeral) Delete(ctx context.Context, id string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *Store) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	pos := slices.IndexFunc(e.events, func(event *nostr.Event) bool { return event != nil && event.ID == id })
+	pos := slices.IndexFunc(s.events, func(event *nostr.Event) bool { return event != nil && event.ID == id })
 	if pos == -1 {
 		return nil
 	}
 
-	e.events[pos] = nil
+	s.events[pos] = nil
 	return nil
 }
 
-func (e *Ephemeral) Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Event, error) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+func (s *Store) Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	limit := e.capacity
+	limit := s.capacity
 	if filter.Limit > 0 {
-		limit = min(filter.Limit, e.capacity)
+		limit = min(filter.Limit, s.capacity)
 	}
 
 	events := make([]nostr.Event, 0, limit)
-	for _, event := range e.events {
+	for _, event := range s.events {
 		if len(events) >= limit {
 			break
 		}
@@ -163,17 +163,17 @@ func (e *Ephemeral) Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Ev
 	return events, nil
 }
 
-func (e *Ephemeral) Count(ctx context.Context, filter *nostr.Filter) (int64, error) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+func (s *Store) Count(ctx context.Context, filter *nostr.Filter) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	limit := e.capacity
+	limit := s.capacity
 	if filter.Limit > 0 {
-		limit = min(filter.Limit, e.capacity)
+		limit = min(filter.Limit, s.capacity)
 	}
 
 	var count int
-	for _, event := range e.events {
+	for _, event := range s.events {
 		if count >= limit {
 			break
 		}
