@@ -9,8 +9,13 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// Ephemeral is an in-memory, thread-safe ring-buffer for storing Nostr events with a fixed memory footprint.
-// Because of its efficiency and limited scope, it doesn't have query limits.
+// Ephemeral is an in-memory, thread-safe ring-buffer for storing Nostr events.
+// It maintains a fixed memory footprint, storing up to `capacity` events.
+// When new events are saved and the capacity is full, they overwrite the oldest events
+// in a circular fashion.
+//
+// Due to its expected small capacity (e.g. 1000 events) and in-memory nature,
+// it does not impose query result limits beyond what the Nostr filter itself specifies
 type Ephemeral struct {
 	mu       sync.RWMutex
 	events   []*nostr.Event
