@@ -1,3 +1,4 @@
+// The ephemeral package defines an in-memory, thread-safe ring-buffer for storing Nostr events
 package ephemeral
 
 import (
