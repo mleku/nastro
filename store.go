@@ -9,24 +9,37 @@ import (
 )
 
 var (
+	ErrInvalidReplacement = errors.New("called Replace on a non-replaceable event")
+
 	ErrTooManyIDs     = errors.New("too many IDs in filter")
 	ErrTooManyAuthors = errors.New("too many authors in filter")
 	ErrTooManyKinds   = errors.New("too many kinds in filter")
 	ErrTooManyTags    = errors.New("too many tags in filter")
 	ErrEmptyFilter    = errors.New("filter must specify at least one ID, kind, author, tag, or time range")
+
+	ErrInternalQuery = errors.New("internal query error")
 )
 
 type Store interface {
 	// Save the event in the store
 	Save(ctx context.Context, event *nostr.Event) error
 
-	// Replace an old event with the new one according to NIP-01 (replaceable, addressable...)
-	// It returns true if the event has been saved.
+	// Delete the event with the provided id. If the event is not found, nothing happens and nil is returned.
+	Delete(ctx context.Context, id string) error
+
+	// Replace an old event with the new one according to NIP-01.
+	//
+	// The replacement happens if the event is strictly newer than the stored event
+	// within the same 'category' (kind, pubkey, and d-tag if addressable).
+	// If no such stored event exists, and the event is a replaceable/addressable kind, it is simply saved.
+	//
+	// Calling Replace on a non-replaceable/addressable event returns [ErrInvalidReplacement]
+	//
+	// Replace returns true if the event has been saved/superseded a previous one,
+	// false in case of errors or if a stored event in the same 'category' is newer or equal.
+	//
 	// More info here: https://github.com/nostr-protocol/nips/blob/master/01.md#kinds
 	Replace(ctx context.Context, event *nostr.Event) (bool, error)
-
-	// Delete the event with the provided id.
-	Delete(ctx context.Context, id string) error
 
 	// Query stored events matching the provided filter.
 	Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Event, error)
@@ -83,6 +96,13 @@ func (q QueryLimits) Validate(filter *nostr.Filter) error {
 
 	if filter.Limit < 1 || filter.Limit > q.MaxLimit {
 		filter.Limit = q.MaxLimit
+	}
+	return nil
+}
+
+func ValidateReplacement(kind int) error {
+	if !nostr.IsReplaceableKind(kind) && !nostr.IsAddressableKind(kind) {
+		return ErrInvalidReplacement
 	}
 	return nil
 }

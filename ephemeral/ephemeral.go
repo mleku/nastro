@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/pippellia-btc/nastro"
 )
 
 // Ephemeral is an in-memory, thread-safe ring-buffer for storing Nostr events.
@@ -24,7 +25,7 @@ type Store struct {
 	capacity int
 }
 
-// New creates an ephemeral store with the provided capacity.
+// New returns an ephemeral store with the provided capacity.
 func New(capacity int) *Store {
 	return &Store{
 		events:   make([]*nostr.Event, capacity),
@@ -86,6 +87,10 @@ func (s *Store) Save(ctx context.Context, event *nostr.Event) error {
 }
 
 func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
+	if err := nastro.ValidateReplacement(event.Kind); err != nil {
+		return false, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
