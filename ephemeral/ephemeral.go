@@ -4,6 +4,7 @@ package ephemeral
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 
@@ -87,8 +88,8 @@ func (s *Store) Save(ctx context.Context, event *nostr.Event) error {
 }
 
 func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
-	if err := nastro.ValidateReplacement(event.Kind); err != nil {
-		return false, err
+	if !nastro.IsValidReplacement(event.Kind) {
+		return false, fmt.Errorf("%w: event ID %s, kind %d", nastro.ErrInvalidReplacement, event.ID, event.Kind)
 	}
 
 	s.mu.Lock()

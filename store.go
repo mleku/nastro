@@ -21,7 +21,8 @@ var (
 )
 
 type Store interface {
-	// Save the event in the store
+	// Save the event in the store. For replaceable/addressable event, it is
+	// recommended to call Replace instead
 	Save(ctx context.Context, event *nostr.Event) error
 
 	// Delete the event with the provided id. If the event is not found, nothing happens and nil is returned.
@@ -100,9 +101,6 @@ func (q QueryLimits) Validate(filter *nostr.Filter) error {
 	return nil
 }
 
-func ValidateReplacement(kind int) error {
-	if !nostr.IsReplaceableKind(kind) && !nostr.IsAddressableKind(kind) {
-		return ErrInvalidReplacement
-	}
-	return nil
+func IsValidReplacement(kind int) bool {
+	return nostr.IsReplaceableKind(kind) || nostr.IsAddressableKind(kind)
 }
