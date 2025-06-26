@@ -9,15 +9,18 @@ import (
 )
 
 var (
+	ErrTooManyEventTags    = errors.New("too many tags in event")
+	ErrTooMuchEventContent = errors.New("event content is too big")
+
+	ErrEmptyFilters         = errors.New("filters slice cannot be empty")
+	ErrEmptyFilter          = errors.New("filter must specify at least one ID, kind, author, tag, or time range")
+	ErrTooManyFilterIDs     = errors.New("too many IDs in filters")
+	ErrTooManyFilterAuthors = errors.New("too many authors in filters")
+	ErrTooManyFilterKinds   = errors.New("too many kinds in filters")
+	ErrTooManyFilterTags    = errors.New("too many tags in filters")
+
 	ErrInvalidReplacement = errors.New("called Replace on a non-replaceable event")
-
-	ErrTooManyIDs     = errors.New("too many IDs in filter")
-	ErrTooManyAuthors = errors.New("too many authors in filter")
-	ErrTooManyKinds   = errors.New("too many kinds in filter")
-	ErrTooManyTags    = errors.New("too many tags in filter")
-	ErrEmptyFilter    = errors.New("filter must specify at least one ID, kind, author, tag, or time range")
-
-	ErrInternalQuery = errors.New("internal query error")
+	ErrInternalQuery      = errors.New("internal query error")
 )
 
 type Store interface {
@@ -42,11 +45,11 @@ type Store interface {
 	// More info here: https://github.com/nostr-protocol/nips/blob/master/01.md#kinds
 	Replace(ctx context.Context, event *nostr.Event) (bool, error)
 
-	// Query stored events matching the provided filter.
-	Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Event, error)
+	// Query stored events matching the provided filters.
+	Query(ctx context.Context, filters nostr.Filters) ([]nostr.Event, error)
 
-	// Count stored events matching the provided filter.
-	Count(ctx context.Context, filter *nostr.Filter) (int64, error)
+	// Count stored events matching the provided filters.
+	Count(ctx context.Context, filters nostr.Filters) (int64, error)
 }
 
 // QueryLimits protects the database from queries (not counts) that are too expensive.
@@ -60,47 +63,79 @@ type QueryLimits struct {
 
 func NewQueryLimits() QueryLimits {
 	return QueryLimits{
-		MaxIDs:     100,
-		MaxKinds:   10,
-		MaxAuthors: 100,
-		MaxTags:    5,
-		MaxLimit:   1000,
+		MaxIDs:     500,
+		MaxKinds:   50,
+		MaxAuthors: 500,
+		MaxTags:    25,
+		MaxLimit:   5000,
 	}
 }
 
-// Validate returns an error if the filter breaks any of the [QueryLimits].
-// It modifies the filter's limit if it's either not set or too big.
-func (q QueryLimits) Validate(filter *nostr.Filter) error {
-	IDs := len(filter.IDs)
+// Validate returns an error if the filters breaks any of the [QueryLimits].
+func (q QueryLimits) Validate(filters nostr.Filters) error {
+	if len(filters) == 0 {
+		return ErrEmptyFilters
+	}
+
+	var IDs, kinds, authors, tags int
+	for i, filter := range filters {
+		if IsEmptyFilter(&filter) {
+			return fmt.Errorf("filters[%d]: %w", i, ErrEmptyFilter)
+		}
+
+		IDs += len(filter.IDs)
+		kinds += len(filter.Kinds)
+		authors += len(filter.Authors)
+		tags += len(filter.Tags)
+	}
+
 	if IDs > q.MaxIDs {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyIDs, q.MaxIDs, IDs)
+		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterIDs, q.MaxIDs, IDs)
 	}
 
-	kinds := len(filter.Kinds)
 	if kinds > q.MaxKinds {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyKinds, q.MaxKinds, kinds)
+		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterKinds, q.MaxKinds, kinds)
 	}
 
-	authors := len(filter.Authors)
 	if authors > q.MaxAuthors {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyAuthors, q.MaxAuthors, authors)
+		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterAuthors, q.MaxAuthors, authors)
 	}
 
-	tags := len(filter.Tags)
 	if tags > q.MaxTags {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyTags, q.MaxTags, tags)
+		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterTags, q.MaxTags, tags)
+	}
+	return nil
+}
+
+// WriteLimits protects the database from saves or replaces that are too expensive.
+type WriteLimits struct {
+	MaxTags          int
+	MaxContentLenght int
+}
+
+func NewWriteLimits() WriteLimits {
+	return WriteLimits{
+		MaxTags:          10000,
+		MaxContentLenght: 50000,
+	}
+}
+
+// Validate returns an error if the event breaks any of the [WriteLimits].
+func (w WriteLimits) Validate(event *nostr.Event) error {
+	if len(event.Tags) > w.MaxTags {
+		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyEventTags, w.MaxTags, len(event.Tags))
 	}
 
-	if IDs+kinds+authors+tags == 0 && filter.Since == nil && filter.Until == nil {
-		return ErrEmptyFilter
-	}
-
-	if filter.Limit < 1 || filter.Limit > q.MaxLimit {
-		filter.Limit = q.MaxLimit
+	if len(event.Content) > w.MaxContentLenght {
+		return fmt.Errorf("%w: max %d, requested %d", ErrTooMuchEventContent, w.MaxContentLenght, len(event.Content))
 	}
 	return nil
 }
 
 func IsValidReplacement(kind int) bool {
 	return nostr.IsReplaceableKind(kind) || nostr.IsAddressableKind(kind)
+}
+
+func IsEmptyFilter(f *nostr.Filter) bool {
+	return len(f.IDs) == 0 && len(f.Kinds) == 0 && len(f.Authors) == 0 && len(f.Tags) == 0 && f.Since == nil && f.Until == nil
 }

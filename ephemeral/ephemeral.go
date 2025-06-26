@@ -18,7 +18,7 @@ import (
 // in a circular fashion.
 //
 // Due to its expected small capacity (e.g. 1000 events) and in-memory nature,
-// it does not impose query result limits beyond what the Nostr filter itself specifies
+// it does not impose write or query limits.
 type Store struct {
 	mu       sync.RWMutex
 	events   []*nostr.Event
@@ -144,23 +144,32 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Event, error) {
+func (s *Store) Query(ctx context.Context, filters nostr.Filters) ([]nostr.Event, error) {
+	if len(filters) == 0 {
+		return nil, nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	limit := s.capacity
-	if filter.Limit > 0 {
-		limit = min(filter.Limit, s.capacity)
-	}
-
-	events := make([]nostr.Event, 0, limit)
-	for _, event := range s.events {
-		if len(events) >= limit {
-			break
+	var expected int
+	for i := range filters {
+		if filters[i].Limit == 0 {
+			expected = s.capacity
 		}
+		expected += filters[i].Limit
+	}
+	events := make([]nostr.Event, 0, expected)
 
-		if event != nil && filter.Matches(event) {
-			events = append(events, *event)
+	for _, filter := range filters {
+		for _, event := range s.events {
+			if filter.Limit > 0 && len(events) >= filter.Limit {
+				break
+			}
+
+			if event != nil && filter.Matches(event) {
+				events = append(events, *event)
+			}
 		}
 	}
 
@@ -169,23 +178,24 @@ func (s *Store) Query(ctx context.Context, filter *nostr.Filter) ([]nostr.Event,
 	return events, nil
 }
 
-func (s *Store) Count(ctx context.Context, filter *nostr.Filter) (int64, error) {
+func (s *Store) Count(ctx context.Context, filters nostr.Filters) (int64, error) {
+	if len(filters) == 0 {
+		return 0, nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	limit := s.capacity
-	if filter.Limit > 0 {
-		limit = min(filter.Limit, s.capacity)
-	}
-
 	var count int
-	for _, event := range s.events {
-		if count >= limit {
-			break
-		}
+	for _, filter := range filters {
+		for _, event := range s.events {
+			if filter.Limit > 0 && count >= filter.Limit {
+				break
+			}
 
-		if event != nil && filter.Matches(event) {
-			count++
+			if event != nil && filter.Matches(event) {
+				count++
+			}
 		}
 	}
 	return int64(count), nil
