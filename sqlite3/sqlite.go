@@ -70,7 +70,12 @@ type Store struct {
 // provided in the [New] constructor.
 //
 // For examples, check out the [DefaultQueryBuilder] and [DefaultCountBuilder]
-type QueryBuilder func(filters ...nostr.Filter) (queries []string, args [][]any, err error)
+type QueryBuilder func(filters ...nostr.Filter) (queries []Query, err error)
+
+type Query struct {
+	SQL  string
+	Args []any
+}
 
 type Option func(*Store) error
 
@@ -258,14 +263,14 @@ func (s *Store) QueryWithBuilder(ctx context.Context, builder QueryBuilder, filt
 		return nil, err
 	}
 
-	queries, args, err := builder(filters...)
+	queries, err := builder(filters...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build query: %w", err)
 	}
 
 	events := make([]nostr.Event, 0, s.queryLimits.MaxLimit)
-	for i := range queries {
-		rows, err := s.DB.QueryContext(ctx, queries[i], args[i]...)
+	for i, query := range queries {
+		rows, err := s.DB.QueryContext(ctx, query.SQL, query.Args...)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -297,20 +302,16 @@ func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, erro
 
 // CountWithBuilder generates an sqlite query for the filters with the provided builder, and executes it.
 func (s *Store) CountWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) (int64, error) {
-	queries, args, err := builder(filters...)
+	queries, err := builder(filters...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to build count query: %w", err)
 	}
 
 	var total int64
-	for i := range queries {
+	for i, query := range queries {
 		var count int64
-		row := s.DB.QueryRowContext(ctx, queries[i], args[i]...)
+		row := s.DB.QueryRowContext(ctx, query.SQL, query.Args...)
 		err := row.Scan(&count)
-
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
 		if err != nil {
 			return 0, fmt.Errorf("failed to count events with query %s: %w", queries[i], err)
 		}
@@ -320,16 +321,16 @@ func (s *Store) CountWithBuilder(ctx context.Context, builder QueryBuilder, filt
 	return total, nil
 }
 
-func DefaultQueryBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
+func DefaultQueryBuilder(filters ...nostr.Filter) ([]Query, error) {
 	switch len(filters) {
 	case 0:
-		return nil, nil, nastro.ErrEmptyFilters
+		return nil, nastro.ErrEmptyFilters
 
 	case 1:
 		query, args := buildQuery(filters[0])
 		query += " ORDER BY e.created_at DESC, e.id ASC LIMIT ?"
 		args = append(args, filters[0].Limit)
-		return []string{query}, [][]any{args}, nil
+		return []Query{{SQL: query, Args: args}}, nil
 
 	default:
 		subQueries := make([]string, 0, len(filters))
@@ -346,18 +347,18 @@ func DefaultQueryBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
 		query := "SELECT DISTINCT * FROM (" + strings.Join(subQueries, " UNION ALL ") + ")" +
 			" ORDER BY created_at DESC, id ASC LIMIT ?"
 		allArgs = append(allArgs, limit)
-		return []string{query}, [][]any{allArgs}, nil
+		return []Query{{SQL: query, Args: allArgs}}, nil
 	}
 }
 
-func DefaultCountBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
+func DefaultCountBuilder(filters ...nostr.Filter) ([]Query, error) {
 	switch len(filters) {
 	case 0:
-		return nil, nil, nastro.ErrEmptyFilters
+		return nil, nastro.ErrEmptyFilters
 
 	case 1:
 		query, args := buildCount(filters[0])
-		return []string{query}, [][]any{args}, nil
+		return []Query{{SQL: query, Args: args}}, nil
 
 	default:
 		subQueries := make([]string, 0, len(filters))
@@ -370,7 +371,7 @@ func DefaultCountBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
 		}
 
 		query := "SELECT (" + strings.Join(subQueries, " + ") + ")"
-		return []string{query}, [][]any{allArgs}, nil
+		return []Query{{SQL: query, Args: allArgs}}, nil
 	}
 }
 
