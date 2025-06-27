@@ -189,10 +189,6 @@ func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, erro
 	var count int
 	for _, filter := range filters {
 		for _, event := range s.events {
-			if filter.Limit > 0 && count >= filter.Limit {
-				break
-			}
-
 			if event != nil && filter.Matches(event) {
 				count++
 			}
