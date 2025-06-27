@@ -13,14 +13,13 @@ import (
 	"github.com/pippellia-btc/nastro"
 )
 
-const baseSchema = `
+const schema = `
 	CREATE TABLE IF NOT EXISTS events (
        id TEXT PRIMARY KEY,
        pubkey TEXT NOT NULL,
        created_at INTEGER NOT NULL,
        kind INTEGER NOT NULL,
        tags JSONB NOT NULL,
-	   d_tag TEXT,
        content TEXT NOT NULL,
        sig TEXT NOT NULL
 	);
@@ -28,33 +27,63 @@ const baseSchema = `
 	CREATE INDEX IF NOT EXISTS pubkey_idx ON events(pubkey);
 	CREATE INDEX IF NOT EXISTS time_idx ON events(created_at DESC);
 	CREATE INDEX IF NOT EXISTS kind_idx ON events(kind);
-	CREATE INDEX IF NOT EXISTS addressable_idx ON events(kind, pubkey, d_tag);`
+	
+	CREATE TABLE IF NOT EXISTS event_tags (
+		event_id TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		
+		PRIMARY KEY (event_id, key, value),
+		FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS event_tags_key_value_idx ON event_tags(key, value);
+
+	CREATE TRIGGER IF NOT EXISTS d_tags_ai AFTER INSERT ON events
+	WHEN NEW.kind BETWEEN 30000 AND 39999 
+	BEGIN
+	INSERT INTO event_tags (event_id, key, value)
+	VALUES (
+		NEW.id,
+		'd',
+		json_extract(NEW.tags, '$[?(@[0]=="d")][1]')
+	);
+	END;`
 
 // Store of Nostr events store that uses an sqlite3 database.
 // It embeds the *sql.DB connection for direct interaction and manages
-// configurable limits and query building for efficient event handling.
+// configurable limits and query building.
 type Store struct {
 	*sql.DB
-	builder QueryBuilder
+	queryBuilder QueryBuilder
+	countBuilder QueryBuilder
 
 	queryLimits nastro.QueryLimits
 	writeLimits nastro.WriteLimits
 }
 
 // QueryBuilder converts multiple nostr filters into one or more sqlite queries and lists of arguments.
+// Filters have been previously validated by [nastro.QueryLimits.Validate]
 // Not all filters can be combined into a single query, but many can.
 //
-// It's useful to specify a custom query builder to leverage additional schemas that have been
+// It's useful to specify custom query and count builders to leverage additional schemas that have been
 // provided in the [New] constructor.
 //
-// For an example, check out the [DefaultQueryBuilder]
-type QueryBuilder func(filters nostr.Filters) (queries []string, args [][]any, err error)
+// For examples, check out the [DefaultQueryBuilder] and [DefaultCountBuilder]
+type QueryBuilder func(filters ...nostr.Filter) (queries []string, args [][]any, err error)
 
 type Option func(*Store) error
 
 func WithQueryBuilder(b QueryBuilder) Option {
 	return func(s *Store) error {
-		s.builder = b
+		s.queryBuilder = b
+		return nil
+	}
+}
+
+func WithCountBuilder(b QueryBuilder) Option {
+	return func(s *Store) error {
+		s.countBuilder = b
 		return nil
 	}
 }
@@ -90,7 +119,7 @@ func New(URL string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("failed to connect to sqlite3 at %s: %w", URL, err)
 	}
 
-	if _, err := DB.Exec(baseSchema); err != nil {
+	if _, err := DB.Exec(schema); err != nil {
 		return nil, fmt.Errorf("failed to apply base schema: %w", err)
 	}
 
@@ -99,10 +128,11 @@ func New(URL string, opts ...Option) (*Store, error) {
 	}
 
 	store := &Store{
-		DB:          DB,
-		builder:     DefaultQueryBuilder,
-		queryLimits: nastro.NewQueryLimits(),
-		writeLimits: nastro.NewWriteLimits(),
+		DB:           DB,
+		queryBuilder: DefaultQueryBuilder,
+		countBuilder: DefaultCountBuilder,
+		queryLimits:  nastro.NewQueryLimits(),
+		writeLimits:  nastro.NewWriteLimits(),
 	}
 
 	for _, opt := range opts {
@@ -123,13 +153,8 @@ func (s *Store) Save(ctx context.Context, e *nostr.Event) error {
 		return fmt.Errorf("failed to marshal the tags of event with ID %s: %w", e.ID, err)
 	}
 
-	var dTag string
-	if nostr.IsAddressableKind(e.Kind) {
-		dTag = e.Tags.GetD()
-	}
-
-	_, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, d_tag, content, sig)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, e.ID, e.PubKey, e.CreatedAt, e.Kind, tags, dTag, e.Content, e.Sig)
+	_, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, content, sig)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)`, e.ID, e.PubKey, e.CreatedAt, e.Kind, tags, e.Content, e.Sig)
 
 	if err != nil {
 		return fmt.Errorf("failed to save event with ID %s: %w", e.ID, err)
@@ -158,7 +183,7 @@ func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
 		args = []any{event.Kind, event.PubKey}
 
 	case nostr.IsAddressableKind(event.Kind):
-		query = "SELECT id, created_at FROM events WHERE kind = $1 AND pubkey = $2 AND d_tag = $3"
+		query = "SELECT e.id, e.created_at FROM events AS e JOIN event_tags AS t ON e.id = t.event_id WHERE e.kind = $1 AND e.pubkey = $2 AND t.key = 'd' AND t.value = $3;"
 		args = []any{event.Kind, event.PubKey, event.Tags.GetD()}
 
 	default:
@@ -178,7 +203,7 @@ func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
 	}
 
 	if err != nil {
-		return false, fmt.Errorf("failed to query for old events: %w", err)
+		return false, fmt.Errorf("failed to query for old events to replace: %w", err)
 	}
 
 	if oldCreatedAt >= event.CreatedAt {
@@ -200,19 +225,14 @@ func (s *Store) replace(ctx context.Context, new *nostr.Event, id string) error 
 		return fmt.Errorf("failed to marshal the tags: %w", err)
 	}
 
-	var dTag string
-	if nostr.IsAddressableKind(new.Kind) {
-		dTag = new.Tags.GetD()
-	}
-
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to initiate the transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, d_tag, content, sig)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, new.ID, new.PubKey, new.CreatedAt, new.Kind, tags, dTag, new.Content, new.Sig)
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, content, sig)
+	VALUES ($1, $2, $3, $4, $5, $6, $7)`, new.ID, new.PubKey, new.CreatedAt, new.Kind, tags, new.Content, new.Sig)
 
 	if err != nil {
 		return fmt.Errorf("failed to save event with ID %s: %w", new.ID, err)
@@ -228,16 +248,17 @@ func (s *Store) replace(ctx context.Context, new *nostr.Event, id string) error 
 	return nil
 }
 
-func (s *Store) Query(ctx context.Context, filters nostr.Filters) ([]nostr.Event, error) {
-	return s.QueryWithBuilder(ctx, filters, s.builder)
+func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Event, error) {
+	return s.QueryWithBuilder(ctx, s.queryBuilder, filters...)
 }
 
-func (s *Store) QueryWithBuilder(ctx context.Context, filters nostr.Filters, builder QueryBuilder) ([]nostr.Event, error) {
-	if err := s.queryLimits.Validate(filters); err != nil {
+// QueryWithBuilder generates an sqlite query for the filters with the provided builder, and executes it.
+func (s *Store) QueryWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) ([]nostr.Event, error) {
+	if err := s.queryLimits.Validate(filters...); err != nil {
 		return nil, err
 	}
 
-	queries, args, err := builder(filters)
+	queries, args, err := builder(filters...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build query: %w", err)
 	}
@@ -246,10 +267,8 @@ func (s *Store) QueryWithBuilder(ctx context.Context, filters nostr.Filters, bui
 	for i := range queries {
 		rows, err := s.DB.QueryContext(ctx, queries[i], args[i]...)
 		if errors.Is(err, sql.ErrNoRows) {
-			// no results, skip to next query
 			continue
 		}
-
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch events with query %s: %w", queries[i], err)
 		}
@@ -272,52 +291,133 @@ func (s *Store) QueryWithBuilder(ctx context.Context, filters nostr.Filters, bui
 	return events, nil
 }
 
-// Default [QueryBuilder] for the [baseSchema]. It does not perform NIP-50 full text search.
-func DefaultQueryBuilder(filters nostr.Filters) (queries []string, args [][]any, err error) {
-	if len(filters) == 0 {
-		return nil, nil, nastro.ErrEmptyFilters
-	}
-
-	queries = make([]string, len(filters))
-	args = make([][]any, len(filters))
-
-	for i, filter := range filters {
-		queries[i], args[i] = buildQuery(filter)
-	}
-	return queries, args, nil
+func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, error) {
+	return s.CountWithBuilder(ctx, s.countBuilder, filters...)
 }
 
-func buildQuery(filter nostr.Filter) (query string, args []any) {
-	var conditions []string
+// CountWithBuilder generates an sqlite query for the filters with the provided builder, and executes it.
+func (s *Store) CountWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) (int64, error) {
+	queries, args, err := builder(filters...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to build count query: %w", err)
+	}
 
+	var total int64
+	for i := range queries {
+		var count int64
+		row := s.DB.QueryRowContext(ctx, queries[i], args[i]...)
+		err := row.Scan(&count)
+
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("failed to count events with query %s: %w", queries[i], err)
+		}
+
+		total += count
+	}
+	return total, nil
+}
+
+func DefaultQueryBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
+	switch len(filters) {
+	case 0:
+		return nil, nil, nastro.ErrEmptyFilters
+
+	case 1:
+		query, args := buildQuery(filters[0])
+		query += " ORDER BY e.created_at DESC, e.id ASC LIMIT ?"
+		args = append(args, filters[0].Limit)
+		return []string{query}, [][]any{args}, nil
+
+	default:
+		subQueries := make([]string, 0, len(filters))
+		allArgs := make([]any, 0, len(filters))
+		limit := 0
+
+		for _, filter := range filters {
+			query, args := buildQuery(filter)
+			subQueries = append(subQueries, query)
+			allArgs = append(allArgs, args...)
+			limit += filter.Limit
+		}
+
+		query := "SELECT DISTINCT * FROM (" + strings.Join(subQueries, " UNION ALL ") + ")" +
+			" ORDER BY created_at DESC, id ASC LIMIT ?"
+		allArgs = append(allArgs, limit)
+		return []string{query}, [][]any{allArgs}, nil
+	}
+}
+
+func DefaultCountBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
+	switch len(filters) {
+	case 0:
+		return nil, nil, nastro.ErrEmptyFilters
+
+	case 1:
+		query, args := buildCount(filters[0])
+		return []string{query}, [][]any{args}, nil
+
+	default:
+		subQueries := make([]string, 0, len(filters))
+		allArgs := make([]any, 0, len(filters))
+
+		for _, filter := range filters {
+			query, args := buildCount(filter)
+			subQueries = append(subQueries, "("+query+")")
+			allArgs = append(allArgs, args...)
+		}
+
+		query := "SELECT SUM(*) FROM (" + strings.Join(subQueries, " UNION ALL ") + ")"
+		return []string{query}, [][]any{allArgs}, nil
+	}
+}
+
+func buildQuery(filter nostr.Filter) (string, []any) {
+	conditions, args := sqlConditions(filter)
+	query := "SELECT * FROM events AS e" + " WHERE " + strings.Join(conditions, " AND ")
+	return query, args
+}
+
+func buildCount(filter nostr.Filter) (string, []any) {
+	conditions, args := sqlConditions(filter)
+	query := "SELECT COUNT(*) FROM events AS e" +
+		" WHERE " + strings.Join(conditions, " AND ") +
+		" LIMIT ?"
+	args = append(args, filter.Limit)
+	return query, args
+}
+
+func sqlConditions(filter nostr.Filter) (conditions []string, args []any) {
 	if len(filter.IDs) > 0 {
-		conditions = append(conditions, "id IN "+ValueList(len(filter.IDs)))
+		conditions = append(conditions, "e.id IN "+ValueList(len(filter.IDs)))
 		for _, ID := range filter.IDs {
 			args = append(args, ID)
 		}
 	}
 
 	if len(filter.Kinds) > 0 {
-		conditions = append(conditions, "kind IN "+ValueList(len(filter.Kinds)))
+		conditions = append(conditions, "e.kind IN "+ValueList(len(filter.Kinds)))
 		for _, kind := range filter.Kinds {
 			args = append(args, kind)
 		}
 	}
 
 	if len(filter.Authors) > 0 {
-		conditions = append(conditions, "pubkey IN "+ValueList(len(filter.Authors)))
+		conditions = append(conditions, "e.pubkey IN "+ValueList(len(filter.Authors)))
 		for _, author := range filter.Authors {
 			args = append(args, author)
 		}
 	}
 
 	if filter.Until != nil {
-		conditions = append(conditions, "created_at <= ?")
+		conditions = append(conditions, "e.created_at <= ?")
 		args = append(args, filter.Until.Time().Unix())
 	}
 
 	if filter.Since != nil {
-		conditions = append(conditions, "created_at >= ?")
+		conditions = append(conditions, "e.created_at >= ?")
 		args = append(args, filter.Since.Time().Unix())
 	}
 
@@ -328,28 +428,27 @@ func buildQuery(filter nostr.Filter) (query string, args []any) {
 				continue
 			}
 
-			tagCond = append(tagCond,
-				`EXISTS (
-				SELECT 1 FROM json_each(tags) 
-				WHERE json_valid(tags)
-				AND json_each.value ->> 0 = ? 
-				AND json_each.value ->> 1 IN `+ValueList(len(vals))+
-					` )`)
-
+			tagCond = append(tagCond, "(t.key = ? AND t.value IN "+ValueList(len(vals))+")")
 			args = append(args, key)
 			for _, val := range vals {
 				args = append(args, val)
 			}
 		}
 
-		// tag conditions are OR-ed together
-		conditions = append(conditions, "( "+strings.Join(tagCond, " OR ")+" )")
+		if len(tagCond) > 0 {
+			conditions = append(conditions,
+				"EXISTS (SELECT 1 FROM event_tags AS t "+
+					"WHERE t.event_id = e.id "+
+					"AND ("+strings.Join(tagCond, " OR ")+")",
+			)
+		}
 	}
-
-	query = "SELECT * FROM events WHERE " + strings.Join(conditions, " AND ") + " ORDER BY created_at DESC, id LIMIT ?"
-	args = append(args, filter.Limit)
-	return query, args
+	return conditions, args
 }
+
+// query = "SELECT id, pubkey, created_at, kind, tags, content, sig FROM events WHERE " +
+// strings.Join(conditions, " AND ") + " ORDER BY created_at DESC, id LIMIT ?"
+// args = append(args, filter.Limit)
 
 // ValueList for sqlite queries. e.g. ValueList(4) = "(?,?,?,?)".
 // It panics if n < 1.

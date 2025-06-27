@@ -46,10 +46,10 @@ type Store interface {
 	Replace(ctx context.Context, event *nostr.Event) (bool, error)
 
 	// Query stored events matching the provided filters.
-	Query(ctx context.Context, filters nostr.Filters) ([]nostr.Event, error)
+	Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Event, error)
 
 	// Count stored events matching the provided filters.
-	Count(ctx context.Context, filters nostr.Filters) (int64, error)
+	Count(ctx context.Context, filters ...nostr.Filter) (int64, error)
 }
 
 // QueryLimits protects the database from queries (not counts) that are too expensive.
@@ -72,35 +72,37 @@ func NewQueryLimits() QueryLimits {
 }
 
 // Validate returns an error if the filters breaks any of the [QueryLimits].
-func (q QueryLimits) Validate(filters nostr.Filters) error {
+// It modifies the filter.Limit id unset or too big.
+func (q QueryLimits) Validate(filters ...nostr.Filter) error {
 	if len(filters) == 0 {
 		return ErrEmptyFilters
 	}
 
 	var IDs, kinds, authors, tags int
-	for i, filter := range filters {
-		if IsEmptyFilter(&filter) {
+	for i := range filters {
+		if IsEmptyFilter(filters[i]) {
 			return fmt.Errorf("filters[%d]: %w", i, ErrEmptyFilter)
 		}
 
-		IDs += len(filter.IDs)
-		kinds += len(filter.Kinds)
-		authors += len(filter.Authors)
-		tags += len(filter.Tags)
+		if filters[i].Limit < 1 || filters[i].Limit > q.MaxLimit/len(filters) {
+			filters[i].Limit = q.MaxLimit / len(filters)
+		}
+
+		IDs += len(filters[i].IDs)
+		kinds += len(filters[i].Kinds)
+		authors += len(filters[i].Authors)
+		tags += len(filters[i].Tags)
 	}
 
 	if IDs > q.MaxIDs {
 		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterIDs, q.MaxIDs, IDs)
 	}
-
 	if kinds > q.MaxKinds {
 		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterKinds, q.MaxKinds, kinds)
 	}
-
 	if authors > q.MaxAuthors {
 		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterAuthors, q.MaxAuthors, authors)
 	}
-
 	if tags > q.MaxTags {
 		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterTags, q.MaxTags, tags)
 	}
@@ -136,6 +138,6 @@ func IsValidReplacement(kind int) bool {
 	return nostr.IsReplaceableKind(kind) || nostr.IsAddressableKind(kind)
 }
 
-func IsEmptyFilter(f *nostr.Filter) bool {
+func IsEmptyFilter(f nostr.Filter) bool {
 	return len(f.IDs) == 0 && len(f.Kinds) == 0 && len(f.Authors) == 0 && len(f.Tags) == 0 && f.Since == nil && f.Until == nil
 }

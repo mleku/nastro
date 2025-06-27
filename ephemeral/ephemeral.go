@@ -144,7 +144,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) Query(ctx context.Context, filters nostr.Filters) ([]nostr.Event, error) {
+func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Event, error) {
 	if len(filters) == 0 {
 		return nil, nil
 	}
@@ -178,7 +178,7 @@ func (s *Store) Query(ctx context.Context, filters nostr.Filters) ([]nostr.Event
 	return events, nil
 }
 
-func (s *Store) Count(ctx context.Context, filters nostr.Filters) (int64, error) {
+func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, error) {
 	if len(filters) == 0 {
 		return 0, nil
 	}

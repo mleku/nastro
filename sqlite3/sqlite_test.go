@@ -1,0 +1,69 @@
+package sqlite
+
+import (
+	"reflect"
+	"testing"
+
+	"github.com/nbd-wtf/go-nostr"
+)
+
+func TestDefaultQueryBuilder(t *testing.T) {
+	tests := []struct {
+		name    string
+		filters nostr.Filters
+		query   string
+		args    []any
+	}{
+		{
+			name:    "single filter, kind",
+			filters: nostr.Filters{{Kinds: []int{0, 1}, Limit: 100}},
+			query:   "SELECT * FROM events AS e WHERE e.kind IN (?,?) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+			args:    []any{0, 1, 100},
+		},
+		{
+			name:    "single filter, authors",
+			filters: nostr.Filters{{Authors: []string{"aaa", "bbb", "xxx"}, Limit: 11}},
+			query:   "SELECT * FROM events AS e WHERE e.pubkey IN (?,?,?) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+			args:    []any{"aaa", "bbb", "xxx", 11},
+		},
+		{
+			name: "single filter, tags",
+			filters: nostr.Filters{{
+				Limit: 11,
+				Tags: nostr.TagMap{
+					"e": {"xxx", "yyy"},
+					"p": {"someone"},
+				},
+			}},
+
+			query: "SELECT * FROM events AS e WHERE EXISTS (SELECT 1 FROM event_tags AS t WHERE t.event_id = e.id AND ((t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value IN (?))) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+			args:  []any{"e", "xxx", "yyy", "p", "someone", 11},
+		},
+		{
+			name: "multiple filter",
+			filters: nostr.Filters{
+				{Kinds: []int{0, 1}, Limit: 69},
+				{Authors: []string{"aaa", "bbb"}, Limit: 420},
+			},
+			query: "SELECT DISTINCT * FROM (SELECT * FROM events AS e WHERE e.kind IN (?,?) UNION ALL SELECT * FROM events AS e WHERE e.pubkey IN (?,?)) ORDER BY created_at DESC, id ASC LIMIT ?",
+			args:  []any{0, 1, "aaa", "bbb", 69 + 420},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query, args, err := DefaultQueryBuilder(test.filters...)
+			if err != nil {
+				t.Fatalf("expected error nil, got %v", err)
+			}
+
+			if query[0] != test.query {
+				t.Fatalf("expected query %v, got %v", test.query, query[0])
+			}
+
+			if !reflect.DeepEqual(args[0], test.args) {
+				t.Fatalf("expected args %v, got %v", test.args, args[0])
+			}
+		})
+	}
+}
