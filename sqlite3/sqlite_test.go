@@ -36,7 +36,7 @@ func TestDefaultQueryBuilder(t *testing.T) {
 				},
 			}},
 
-			query: "SELECT * FROM events AS e WHERE EXISTS (SELECT 1 FROM event_tags AS t WHERE t.event_id = e.id AND ((t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value IN (?))) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+			query: "SELECT * FROM events AS e WHERE EXISTS (SELECT 1 FROM event_tags AS t WHERE t.event_id = e.id AND ((t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value IN (?)))) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
 			args:  []any{"e", "xxx", "yyy", "p", "someone", 11},
 		},
 		{
@@ -53,6 +53,67 @@ func TestDefaultQueryBuilder(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			query, args, err := DefaultQueryBuilder(test.filters...)
+			if err != nil {
+				t.Fatalf("expected error nil, got %v", err)
+			}
+
+			if query[0] != test.query {
+				t.Fatalf("expected query %v, got %v", test.query, query[0])
+			}
+
+			if !reflect.DeepEqual(args[0], test.args) {
+				t.Fatalf("expected args %v, got %v", test.args, args[0])
+			}
+		})
+	}
+}
+
+func TestDefaultCountBuilder(t *testing.T) {
+	tests := []struct {
+		name    string
+		filters nostr.Filters
+		query   string
+		args    []any
+	}{
+		{
+			name:    "single filter, kind",
+			filters: nostr.Filters{{Kinds: []int{0, 1}}},
+			query:   "SELECT COUNT(*) FROM events AS e WHERE e.kind IN (?,?)",
+			args:    []any{0, 1},
+		},
+		{
+			name:    "single filter, authors",
+			filters: nostr.Filters{{Authors: []string{"aaa", "bbb", "xxx"}}},
+			query:   "SELECT COUNT(*) FROM events AS e WHERE e.pubkey IN (?,?,?)",
+			args:    []any{"aaa", "bbb", "xxx"},
+		},
+		{
+			name: "single filter, tags",
+			filters: nostr.Filters{{
+				Limit: 11,
+				Tags: nostr.TagMap{
+					"e": {"xxx", "yyy"},
+					"p": {"someone"},
+				},
+			}},
+
+			query: "SELECT COUNT(*) FROM events AS e WHERE EXISTS (SELECT 1 FROM event_tags AS t WHERE t.event_id = e.id AND ((t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value IN (?))))",
+			args:  []any{"e", "xxx", "yyy", "p", "someone"},
+		},
+		{
+			name: "multiple filter",
+			filters: nostr.Filters{
+				{Kinds: []int{0, 1}},
+				{Authors: []string{"aaa", "bbb"}},
+			},
+			query: "SELECT ((SELECT COUNT(*) FROM events AS e WHERE e.kind IN (?,?)) + (SELECT COUNT(*) FROM events AS e WHERE e.pubkey IN (?,?)))",
+			args:  []any{0, 1, "aaa", "bbb"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query, args, err := DefaultCountBuilder(test.filters...)
 			if err != nil {
 				t.Fatalf("expected error nil, got %v", err)
 			}

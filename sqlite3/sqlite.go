@@ -369,7 +369,7 @@ func DefaultCountBuilder(filters ...nostr.Filter) ([]string, [][]any, error) {
 			allArgs = append(allArgs, args...)
 		}
 
-		query := "SELECT SUM(*) FROM (" + strings.Join(subQueries, " UNION ALL ") + ")"
+		query := "SELECT (" + strings.Join(subQueries, " + ") + ")"
 		return []string{query}, [][]any{allArgs}, nil
 	}
 }
@@ -382,10 +382,7 @@ func buildQuery(filter nostr.Filter) (string, []any) {
 
 func buildCount(filter nostr.Filter) (string, []any) {
 	conditions, args := sqlConditions(filter)
-	query := "SELECT COUNT(*) FROM events AS e" +
-		" WHERE " + strings.Join(conditions, " AND ") +
-		" LIMIT ?"
-	args = append(args, filter.Limit)
+	query := "SELECT COUNT(*) FROM events AS e" + " WHERE " + strings.Join(conditions, " AND ")
 	return query, args
 }
 
@@ -439,7 +436,8 @@ func sqlConditions(filter nostr.Filter) (conditions []string, args []any) {
 			conditions = append(conditions,
 				"EXISTS (SELECT 1 FROM event_tags AS t "+
 					"WHERE t.event_id = e.id "+
-					"AND ("+strings.Join(tagCond, " OR ")+")",
+					"AND ("+strings.Join(tagCond, " OR ")+")"+
+					")",
 			)
 		}
 	}
