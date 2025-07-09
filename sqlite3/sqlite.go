@@ -1,4 +1,4 @@
-// The sqlite package defines an extensible sqlite3 store for Nostr Events.
+// The sqlite package defines an extensible sqlite3 store for Nostr events.
 package sqlite
 
 import (
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/pippellia-btc/nastro"
 )
@@ -43,11 +44,10 @@ const schema = `
 	WHEN NEW.kind BETWEEN 30000 AND 39999 
 	BEGIN
 	INSERT INTO event_tags (event_id, key, value)
-	VALUES (
-		NEW.id,
-		'd',
-		json_extract(NEW.tags, '$[?(@[0]=="d")][1]')
-	);
+		SELECT NEW.id, 'd', json_extract(value, '$[1]')
+		FROM json_each(NEW.tags)
+		WHERE json_type(value) = 'array' AND json_array_length(value) > 1 AND json_extract(value, '$[0]') = 'd'
+		LIMIT 1;
 	END;`
 
 // Store of Nostr events store that uses an sqlite3 database.
@@ -63,10 +63,10 @@ type Store struct {
 }
 
 // QueryBuilder converts multiple nostr filters into one or more sqlite queries and lists of arguments.
-// Filters have been previously validated by [nastro.QueryLimits.Validate]
+// Filters passed to the query builder have been previously validated by [nastro.QueryLimits]
 // Not all filters can be combined into a single query, but many can.
 //
-// It's useful to specify custom query and count builders to leverage additional schemas that have been
+// It's useful to specify custom query/count builders to leverage additional schemas that have been
 // provided in the [New] constructor.
 //
 // For examples, check out the [DefaultQueryBuilder] and [DefaultCountBuilder]
