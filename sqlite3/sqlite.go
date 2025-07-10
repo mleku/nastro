@@ -257,7 +257,7 @@ func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Eve
 	return s.QueryWithBuilder(ctx, s.queryBuilder, filters...)
 }
 
-// QueryWithBuilder generates an sqlite query for the filters with the provided builder, and executes it.
+// QueryWithBuilder generates an sqlite query for the filters with the provided [QueryBuilder], and executes it.
 func (s *Store) QueryWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) ([]nostr.Event, error) {
 	if err := s.queryLimits.Validate(filters...); err != nil {
 		return nil, err
@@ -300,7 +300,7 @@ func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, erro
 	return s.CountWithBuilder(ctx, s.countBuilder, filters...)
 }
 
-// CountWithBuilder generates an sqlite query for the filters with the provided builder, and executes it.
+// CountWithBuilder generates an sqlite query for the filters with the provided [QueryBuilder], and executes it.
 func (s *Store) CountWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) (int64, error) {
 	queries, err := builder(filters...)
 	if err != nil {
@@ -445,12 +445,6 @@ func sqlConditions(filter nostr.Filter) (conditions []string, args []any) {
 	return conditions, args
 }
 
-// query = "SELECT id, pubkey, created_at, kind, tags, content, sig FROM events WHERE " +
-// strings.Join(conditions, " AND ") + " ORDER BY created_at DESC, id LIMIT ?"
-// args = append(args, filter.Limit)
-
 // ValueList for sqlite queries. e.g. ValueList(4) = "(?,?,?,?)".
 // It panics if n < 1.
-func ValueList(n int) string {
-	return "(?" + strings.Repeat(",?", n-1) + ")"
-}
+func ValueList(n int) string { return "(?" + strings.Repeat(",?", n-1) + ")" }
