@@ -117,8 +117,8 @@ type WriteLimits struct {
 
 func NewWriteLimits() WriteLimits {
 	return WriteLimits{
-		MaxTags:          10000,
-		MaxContentLenght: 50000,
+		MaxTags:          20000,
+		MaxContentLenght: 100000,
 	}
 }
 
