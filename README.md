@@ -4,7 +4,7 @@ A collection of plug&play but highly configurable databases for Nostr.
 ## Installation
 
 ```
-go get https://github.com/pippellia-btc/nastro
+go get github.com/pippellia-btc/nastro
 ```
 
 ## Simple Abstraction
