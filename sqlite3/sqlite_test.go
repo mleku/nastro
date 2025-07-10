@@ -10,15 +10,14 @@ import (
 )
 
 var (
-	ctx = context.Background()
-	URL = "test.sqlite"
+	ctx    = context.Background()
+	URL    = "test.sqlite"
+	event1 = nostr.Event{
+		Kind:    30000,
+		Content: "test",
+		Tags:    nostr.Tags{{"d", "test-tag"}},
+	}
 )
-
-var event1 = nostr.Event{
-	Kind:    30000,
-	Content: "test",
-	Tags:    nostr.Tags{{"d", "test-tag"}},
-}
 
 func TestSave(t *testing.T) {
 	store, err := New(URL)
