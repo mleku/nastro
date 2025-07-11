@@ -124,7 +124,7 @@ func TestDefaultQueryBuilder(t *testing.T) {
 			name:    "single filter, kind",
 			filters: nostr.Filters{{Kinds: []int{0, 1}, Limit: 100}},
 			query: Query{
-				SQL:  "SELECT * FROM events AS e WHERE e.kind IN (?,?) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+				SQL:  "SELECT e.* FROM events AS e WHERE e.kind IN (?,?) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
 				Args: []any{0, 1, 100},
 			},
 		},
@@ -132,8 +132,22 @@ func TestDefaultQueryBuilder(t *testing.T) {
 			name:    "single filter, authors",
 			filters: nostr.Filters{{Authors: []string{"aaa", "bbb", "xxx"}, Limit: 11}},
 			query: Query{
-				SQL:  "SELECT * FROM events AS e WHERE e.pubkey IN (?,?,?) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+				SQL:  "SELECT e.* FROM events AS e WHERE e.pubkey IN (?,?,?) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
 				Args: []any{"aaa", "bbb", "xxx", 11},
+			},
+		},
+		{
+			name: "single filter, tag",
+			filters: nostr.Filters{{
+				Limit: 11,
+				Tags: nostr.TagMap{
+					"e": {"xxx"},
+				},
+			}},
+
+			query: Query{
+				SQL:  "SELECT e.* FROM events AS e JOIN event_tags AS t ON t.event_id = e.id WHERE (t.key = ? AND t.value = ?) GROUP BY e.id ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+				Args: []any{"e", "xxx", 11},
 			},
 		},
 		{
@@ -147,7 +161,7 @@ func TestDefaultQueryBuilder(t *testing.T) {
 			}},
 
 			query: Query{
-				SQL:  "SELECT * FROM events AS e WHERE EXISTS (SELECT 1 FROM event_tags AS t WHERE t.event_id = e.id AND ((t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value IN (?)))) ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
+				SQL:  "SELECT e.* FROM events AS e JOIN event_tags AS t ON t.event_id = e.id WHERE (t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value = ?) GROUP BY e.id ORDER BY e.created_at DESC, e.id ASC LIMIT ?",
 				Args: []any{"e", "xxx", "yyy", "p", "someone", 11},
 			},
 		},
@@ -158,7 +172,7 @@ func TestDefaultQueryBuilder(t *testing.T) {
 				{Authors: []string{"aaa", "bbb"}, Limit: 420},
 			},
 			query: Query{
-				SQL:  "SELECT DISTINCT * FROM (SELECT * FROM events AS e WHERE e.kind IN (?,?) UNION ALL SELECT * FROM events AS e WHERE e.pubkey IN (?,?)) ORDER BY created_at DESC, id ASC LIMIT ?",
+				SQL:  "SELECT * FROM (SELECT e.* FROM events AS e WHERE e.kind IN (?,?) UNION ALL SELECT e.* FROM events AS e WHERE e.pubkey IN (?,?)) GROUP BY id ORDER BY created_at DESC, id ASC LIMIT ?",
 				Args: []any{0, 1, "aaa", "bbb", 69 + 420},
 			},
 		},
@@ -186,17 +200,17 @@ func TestDefaultCountBuilder(t *testing.T) {
 	}{
 		{
 			name:    "single filter, kind",
-			filters: nostr.Filters{{Kinds: []int{0, 1}}},
+			filters: nostr.Filters{{Kinds: []int{0}}},
 			query: Query{
-				SQL:  "SELECT COUNT(*) FROM events AS e WHERE e.kind IN (?,?)",
-				Args: []any{0, 1},
+				SQL:  "SELECT COUNT(e.id) FROM events AS e WHERE e.kind = ?",
+				Args: []any{0},
 			},
 		},
 		{
 			name:    "single filter, authors",
 			filters: nostr.Filters{{Authors: []string{"aaa", "bbb", "xxx"}}},
 			query: Query{
-				SQL:  "SELECT COUNT(*) FROM events AS e WHERE e.pubkey IN (?,?,?)",
+				SQL:  "SELECT COUNT(e.id) FROM events AS e WHERE e.pubkey IN (?,?,?)",
 				Args: []any{"aaa", "bbb", "xxx"},
 			},
 		},
@@ -211,7 +225,7 @@ func TestDefaultCountBuilder(t *testing.T) {
 			}},
 
 			query: Query{
-				SQL:  "SELECT COUNT(*) FROM events AS e WHERE EXISTS (SELECT 1 FROM event_tags AS t WHERE t.event_id = e.id AND ((t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value IN (?))))",
+				SQL:  "SELECT COUNT(DISTINCT e.id) FROM events AS e JOIN event_tags AS t ON t.event_id = e.id WHERE (t.key = ? AND t.value IN (?,?)) OR (t.key = ? AND t.value = ?)",
 				Args: []any{"e", "xxx", "yyy", "p", "someone"},
 			},
 		},
@@ -222,7 +236,7 @@ func TestDefaultCountBuilder(t *testing.T) {
 				{Authors: []string{"aaa", "bbb"}},
 			},
 			query: Query{
-				SQL:  "SELECT ((SELECT COUNT(*) FROM events AS e WHERE e.kind IN (?,?)) + (SELECT COUNT(*) FROM events AS e WHERE e.pubkey IN (?,?)))",
+				SQL:  "SELECT ((SELECT COUNT(e.id) FROM events AS e WHERE e.kind IN (?,?)) + (SELECT COUNT(e.id) FROM events AS e WHERE e.pubkey IN (?,?)))",
 				Args: []any{0, 1, "aaa", "bbb"},
 			},
 		},

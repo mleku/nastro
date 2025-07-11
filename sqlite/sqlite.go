@@ -344,8 +344,8 @@ func DefaultQueryBuilder(filters ...nostr.Filter) ([]Query, error) {
 			limit += filter.Limit
 		}
 
-		query := "SELECT DISTINCT * FROM (" + strings.Join(subQueries, " UNION ALL ") + ")" +
-			" ORDER BY created_at DESC, id ASC LIMIT ?"
+		query := "SELECT * FROM (" + strings.Join(subQueries, " UNION ALL ") + ")" +
+			" GROUP BY id ORDER BY created_at DESC, id ASC LIMIT ?"
 		allArgs = append(allArgs, limit)
 		return []Query{{SQL: query, Args: allArgs}}, nil
 	}
@@ -370,81 +370,114 @@ func DefaultCountBuilder(filters ...nostr.Filter) ([]Query, error) {
 			allArgs = append(allArgs, args...)
 		}
 
+		// TODO: we are summing all counts together, without any deduplication
 		query := "SELECT (" + strings.Join(subQueries, " + ") + ")"
 		return []Query{{SQL: query, Args: allArgs}}, nil
 	}
 }
 
 func buildQuery(filter nostr.Filter) (string, []any) {
-	conditions, args := sqlConditions(filter)
-	query := "SELECT * FROM events AS e" + " WHERE " + strings.Join(conditions, " AND ")
-	return query, args
+	sql := toSql(filter)
+	if sql.JoinTags {
+		query := "SELECT e.* FROM events AS e JOIN event_tags AS t ON t.event_id = e.id" +
+			" WHERE " + strings.Join(sql.Conditions, " AND ") + " GROUP BY e.id"
+		return query, sql.Args
+	}
+
+	query := "SELECT e.* FROM events AS e"
+	if len(sql.Conditions) > 0 {
+		query += " WHERE " + strings.Join(sql.Conditions, " AND ")
+	}
+	return query, sql.Args
 }
 
 func buildCount(filter nostr.Filter) (string, []any) {
-	conditions, args := sqlConditions(filter)
-	query := "SELECT COUNT(*) FROM events AS e" + " WHERE " + strings.Join(conditions, " AND ")
-	return query, args
+	sql := toSql(filter)
+	if sql.JoinTags {
+		query := "SELECT COUNT(DISTINCT e.id) FROM events AS e JOIN event_tags AS t ON t.event_id = e.id" +
+			" WHERE " + strings.Join(sql.Conditions, " AND ")
+		return query, sql.Args
+	}
+
+	query := "SELECT COUNT(e.id) FROM events AS e"
+	if len(sql.Conditions) > 0 {
+		query += " WHERE " + strings.Join(sql.Conditions, " AND ")
+	}
+	return query, sql.Args
 }
 
-func sqlConditions(filter nostr.Filter) (conditions []string, args []any) {
+type sqlFilter struct {
+	Conditions []string
+	Args       []any
+	JoinTags   bool
+}
+
+func toSql(filter nostr.Filter) sqlFilter {
+	s := sqlFilter{}
 	if len(filter.IDs) > 0 {
-		conditions = append(conditions, "e.id IN "+ValueList(len(filter.IDs)))
-		for _, ID := range filter.IDs {
-			args = append(args, ID)
+		s.Conditions = append(s.Conditions, "e.id"+equalityClause(filter.IDs))
+		for _, id := range filter.IDs {
+			s.Args = append(s.Args, id)
 		}
 	}
 
 	if len(filter.Kinds) > 0 {
-		conditions = append(conditions, "e.kind IN "+ValueList(len(filter.Kinds)))
+		s.Conditions = append(s.Conditions, "e.kind"+equalityClause(filter.Kinds))
 		for _, kind := range filter.Kinds {
-			args = append(args, kind)
+			s.Args = append(s.Args, kind)
 		}
 	}
 
 	if len(filter.Authors) > 0 {
-		conditions = append(conditions, "e.pubkey IN "+ValueList(len(filter.Authors)))
-		for _, author := range filter.Authors {
-			args = append(args, author)
+		s.Conditions = append(s.Conditions, "e.pubkey"+equalityClause(filter.Authors))
+		for _, pk := range filter.Authors {
+			s.Args = append(s.Args, pk)
 		}
 	}
 
 	if filter.Until != nil {
-		conditions = append(conditions, "e.created_at <= ?")
-		args = append(args, filter.Until.Time().Unix())
+		s.Conditions = append(s.Conditions, "e.created_at <= ?")
+		s.Args = append(s.Args, filter.Until.Time().Unix())
 	}
 
 	if filter.Since != nil {
-		conditions = append(conditions, "e.created_at >= ?")
-		args = append(args, filter.Since.Time().Unix())
+		s.Conditions = append(s.Conditions, "e.created_at >= ?")
+		s.Args = append(s.Args, filter.Since.Time().Unix())
 	}
 
 	if len(filter.Tags) > 0 {
-		tagCond := make([]string, 0, len(filter.Tags))
+		conds := make([]string, 0, len(filter.Tags))
+		args := make([]any, 0, len(filter.Tags))
+
 		for key, vals := range filter.Tags {
 			if len(vals) == 0 {
 				continue
 			}
 
-			tagCond = append(tagCond, "(t.key = ? AND t.value IN "+ValueList(len(vals))+")")
+			conds = append(conds, "(t.key = ? AND t.value"+equalityClause(vals)+")")
 			args = append(args, key)
-			for _, val := range vals {
-				args = append(args, val)
+			for _, v := range vals {
+				args = append(args, v)
 			}
 		}
 
-		if len(tagCond) > 0 {
-			conditions = append(conditions,
-				"EXISTS (SELECT 1 FROM event_tags AS t "+
-					"WHERE t.event_id = e.id "+
-					"AND ("+strings.Join(tagCond, " OR ")+")"+
-					")",
-			)
+		if len(conds) > 0 {
+			s.JoinTags = true
+			s.Conditions = append(s.Conditions, strings.Join(conds, " OR "))
+			s.Args = append(s.Args, args...)
 		}
 	}
-	return conditions, args
+	return s
 }
 
-// ValueList for sqlite queries. e.g. ValueList(4) = "(?,?,?,?)".
-// It panics if n < 1.
-func ValueList(n int) string { return "(?" + strings.Repeat(",?", n-1) + ")" }
+// equalityClause returns the appropriate SQL comparison operator and placeholder(s)
+// for use in a WHERE clause, based on the number of values provided.
+// If the slice contains one value, it returns " = ?".
+// If it contains multiple values, it returns " IN (?, ?, ... )" with the correct number of placeholders.
+// It panics is vals is nil or empty.
+func equalityClause[T any](vals []T) string {
+	if len(vals) == 1 {
+		return " = ?"
+	}
+	return " IN (?" + strings.Repeat(",?", len(vals)-1) + ")"
+}
