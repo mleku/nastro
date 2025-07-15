@@ -72,7 +72,7 @@ func NewQueryLimits() QueryLimits {
 }
 
 // Validate returns an error if the filters breaks any of the [QueryLimits].
-// It modifies the filter.Limit id unset or too big.
+// It modifies the filter.Limit if unset or too big.
 func (q QueryLimits) Validate(filters ...nostr.Filter) error {
 	if len(filters) == 0 {
 		return ErrEmptyFilters
@@ -95,16 +95,16 @@ func (q QueryLimits) Validate(filters ...nostr.Filter) error {
 	}
 
 	if IDs > q.MaxIDs {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterIDs, q.MaxIDs, IDs)
+		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterIDs, IDs, q.MaxIDs)
 	}
 	if kinds > q.MaxKinds {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterKinds, q.MaxKinds, kinds)
+		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterKinds, kinds, q.MaxKinds)
 	}
 	if authors > q.MaxAuthors {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterAuthors, q.MaxAuthors, authors)
+		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterAuthors, authors, q.MaxAuthors)
 	}
 	if tags > q.MaxTags {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyFilterTags, q.MaxTags, tags)
+		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterTags, tags, q.MaxTags)
 	}
 	return nil
 }
@@ -125,11 +125,11 @@ func NewWriteLimits() WriteLimits {
 // Validate returns an error if the event breaks any of the [WriteLimits].
 func (w WriteLimits) Validate(event *nostr.Event) error {
 	if len(event.Tags) > w.MaxTags {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooManyEventTags, w.MaxTags, len(event.Tags))
+		return fmt.Errorf("%w: %d, max %d", ErrTooManyEventTags, len(event.Tags), w.MaxTags)
 	}
 
 	if len(event.Content) > w.MaxContentLenght {
-		return fmt.Errorf("%w: max %d, requested %d", ErrTooMuchEventContent, w.MaxContentLenght, len(event.Content))
+		return fmt.Errorf("%w: %d, max %d", ErrTooMuchEventContent, len(event.Content), w.MaxContentLenght)
 	}
 	return nil
 }
