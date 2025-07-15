@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/nbd-wtf/go-nostr"
@@ -55,6 +57,8 @@ const schema = `
 // configurable limits and query building.
 type Store struct {
 	*sql.DB
+	retries int // the maximum number of retries after a write failure "database is locked"
+
 	queryBuilder QueryBuilder
 	countBuilder QueryBuilder
 
@@ -79,6 +83,19 @@ type Query struct {
 
 type Option func(*Store) error
 
+// WithRetries sets how many times to retry a locked database operation
+// after the first failed attempt. Each retry waits 20ms + jitter (~5ms on average).
+func WithRetries(n int) Option {
+	return func(s *Store) error {
+		if n < 0 {
+			return errors.New("number of retries must be non-negative")
+		}
+		s.retries = n
+		return nil
+	}
+}
+
+// WithQueryBuilder allows to specify the query builder used by the store in [Store.Query].
 func WithQueryBuilder(b QueryBuilder) Option {
 	return func(s *Store) error {
 		s.queryBuilder = b
@@ -86,6 +103,7 @@ func WithQueryBuilder(b QueryBuilder) Option {
 	}
 }
 
+// WithCountBuilder allows to specify the query builder used by the store in [Store.Count].
 func WithCountBuilder(b QueryBuilder) Option {
 	return func(s *Store) error {
 		s.countBuilder = b
@@ -93,6 +111,8 @@ func WithCountBuilder(b QueryBuilder) Option {
 	}
 }
 
+// WithAdditionalSchema allows to specify an additional database schema, like new tables,
+// virtual tables, indexes and triggers.
 func WithAdditionalSchema(schema string) Option {
 	return func(s *Store) error {
 		if _, err := s.DB.Exec(schema); err != nil {
@@ -102,6 +122,7 @@ func WithAdditionalSchema(schema string) Option {
 	}
 }
 
+// WithQueryLimits allows to specify the [nastro.QueryLimits] used to validate the filters before executing a query.
 func WithQueryLimits(q nastro.QueryLimits) Option {
 	return func(s *Store) error {
 		s.queryLimits = q
@@ -109,6 +130,7 @@ func WithQueryLimits(q nastro.QueryLimits) Option {
 	}
 }
 
+// WithWriteLimits allows to specify the [nastro.WriteLimits] used to validate events before writing them.
 func WithWriteLimits(w nastro.WriteLimits) Option {
 	return func(s *Store) error {
 		s.writeLimits = w
@@ -133,7 +155,9 @@ func New(URL string, opts ...Option) (*Store, error) {
 	}
 
 	store := &Store{
-		DB:           DB,
+		DB:      DB,
+		retries: 0,
+
 		queryBuilder: DefaultQueryBuilder,
 		countBuilder: DefaultCountBuilder,
 		queryLimits:  nastro.NewQueryLimits(),
@@ -148,6 +172,34 @@ func New(URL string, opts ...Option) (*Store, error) {
 	return store, nil
 }
 
+// IsDatabaseLocked returns true if the error indicates a locked SQLite database.
+func IsDatabaseLocked(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "database is locked")
+}
+
+// withRetries executes the given database operation with automatic retries
+// in case of a "database is locked" error. It executes [Store.retries]+1 times,
+// waiting 20ms + jitter (5ms on average) between attempts to reduce contention.
+// Returns the operation error immediately if it’s not a locking issue.
+//
+// Note: this function is only useful for writes and not reads if the journal
+// mode is set to WAL (default), as readers don't lock the database.
+func (s *Store) withRetries(op func() error) error {
+	for i := range s.retries + 1 {
+		err := op()
+		if !IsDatabaseLocked(err) {
+			return err
+		}
+
+		if i < s.retries {
+			// sleep unless it's the last try
+			jitter := time.Duration(rand.IntN(10)) * time.Millisecond
+			time.Sleep(20*time.Millisecond + jitter)
+		}
+	}
+	return fmt.Errorf("database is locked: performed (%d) attempts", s.retries+1)
+}
+
 func (s *Store) Save(ctx context.Context, e *nostr.Event) error {
 	if err := s.writeLimits.Validate(e); err != nil {
 		return err
@@ -158,8 +210,11 @@ func (s *Store) Save(ctx context.Context, e *nostr.Event) error {
 		return fmt.Errorf("failed to marshal the tags of event with ID %s: %w", e.ID, err)
 	}
 
-	_, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, content, sig)
+	err = s.withRetries(func() error {
+		_, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, content, sig)
         VALUES ($1, $2, $3, $4, $5, $6, $7)`, e.ID, e.PubKey, e.CreatedAt, e.Kind, tags, e.Content, e.Sig)
+		return err
+	})
 
 	if err != nil {
 		return fmt.Errorf("failed to save event with ID %s: %w", e.ID, err)
@@ -168,7 +223,12 @@ func (s *Store) Save(ctx context.Context, e *nostr.Event) error {
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
-	if _, err := s.DB.ExecContext(ctx, "DELETE FROM events WHERE id = $1", id); err != nil {
+	err := s.withRetries(func() error {
+		_, err := s.DB.ExecContext(ctx, "DELETE FROM events WHERE id = $1", id)
+		return err
+	})
+
+	if err != nil {
 		return fmt.Errorf("failed to delete event with ID %s: %w", id, err)
 	}
 	return nil
@@ -230,27 +290,29 @@ func (s *Store) replace(ctx context.Context, new *nostr.Event, id string) error 
 		return fmt.Errorf("failed to marshal the tags: %w", err)
 	}
 
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to initiate the transaction: %w", err)
-	}
-	defer tx.Rollback()
+	return s.withRetries(func() error {
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to initiate the transaction: %w", err)
+		}
+		defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, content, sig)
-	VALUES ($1, $2, $3, $4, $5, $6, $7)`, new.ID, new.PubKey, new.CreatedAt, new.Kind, tags, new.Content, new.Sig)
+		_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, tags, content, sig)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, new.ID, new.PubKey, new.CreatedAt, new.Kind, tags, new.Content, new.Sig)
 
-	if err != nil {
-		return fmt.Errorf("failed to save event with ID %s: %w", new.ID, err)
-	}
+		if err != nil {
+			return fmt.Errorf("failed to save event with ID %s: %w", new.ID, err)
+		}
 
-	if _, err = tx.ExecContext(ctx, "DELETE FROM events WHERE id = $1", id); err != nil {
-		return fmt.Errorf("failed to delete old event with ID %s: %w", id, err)
-	}
+		if _, err = tx.ExecContext(ctx, "DELETE FROM events WHERE id = $1", id); err != nil {
+			return fmt.Errorf("failed to delete old event with ID %s: %w", id, err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to replace event %s with event %s: %w", id, new.ID, err)
-	}
-	return nil
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to replace event %s with event %s: %w", id, new.ID, err)
+		}
+		return nil
+	})
 }
 
 func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Event, error) {
