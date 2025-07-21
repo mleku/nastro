@@ -362,8 +362,8 @@ func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, erro
 }
 
 // CountWithBuilder generates an sqlite query for the filters with the provided [QueryBuilder], and executes it.
-func (s *Store) CountWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) (int64, error) {
-	queries, err := builder(filters...)
+func (s *Store) CountWithBuilder(ctx context.Context, build QueryBuilder, filters ...nostr.Filter) (int64, error) {
+	queries, err := build(filters...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to build count query: %w", err)
 	}
