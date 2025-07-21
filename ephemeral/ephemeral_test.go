@@ -26,7 +26,14 @@ func TestConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 
-	store := New(capacity)
+	store, err := New(
+		WithCapacity(capacity),
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	expectedSize := atomic.Int64{}
 	errChan := make(chan error, 10)
 
@@ -102,7 +109,7 @@ func TestConcurrency(t *testing.T) {
 func TestReplace(t *testing.T) {
 	tests := []struct {
 		name  string
-		setup func() *Store
+		setup func() (*Store, error)
 		event *nostr.Event
 
 		saved bool
@@ -141,7 +148,11 @@ func TestReplace(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store := test.setup()
+			store, err := test.setup()
+			if err != nil {
+				t.Fatalf("setup failed: %v", err)
+			}
+
 			saved, err := store.Replace(context.Background(), test.event)
 
 			if !errors.Is(err, test.err) {
@@ -164,12 +175,14 @@ func TestInterface(t *testing.T) {
 	var _ nastro.Store = &Store{}
 }
 
-func Empty() *Store { return New(100) }
+func Empty() (*Store, error) { return New(WithCapacity(100)) }
 
-func OneEvent(kind int) func() *Store {
-	return func() *Store {
-		store := New(100)
-		store.Save(context.Background(), &nostr.Event{CreatedAt: 0, Kind: kind})
-		return store
+func OneEvent(kind int) func() (*Store, error) {
+	return func() (*Store, error) {
+		store, err := New(WithCapacity(100))
+		if err != nil {
+			return nil, err
+		}
+		return store, store.Save(context.Background(), &nostr.Event{CreatedAt: 0, Kind: kind})
 	}
 }

@@ -4,6 +4,7 @@ package ephemeral
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -12,26 +13,72 @@ import (
 	"github.com/pippellia-btc/nastro"
 )
 
+var DefaultCapacity int = 1000
+
 // Ephemeral is an in-memory, thread-safe ring-buffer for storing Nostr events.
 // It maintains a fixed memory footprint, storing up to `capacity` events.
 // When new events are saved and the capacity is full, they overwrite the oldest events
 // in a circular fashion.
 //
 // Due to its expected small capacity (e.g. 1000 events) and in-memory nature,
-// it does not impose write or query limits.
+// it does not impose write or query limits by default.
 type Store struct {
 	mu       sync.RWMutex
 	events   []*nostr.Event
 	write    int
 	capacity int
+
+	validateEvent  nastro.EventValidator
+	validateFilter nastro.FilterValidator
+}
+
+type Option func(*Store) error
+
+func WithCapacity(n int) Option {
+	return func(s *Store) error {
+		if n < 1 {
+			return errors.New("capacity must be positive")
+		}
+
+		s.capacity = n
+		s.events = make([]*nostr.Event, n)
+		return nil
+	}
+}
+
+// WithFilterValidator sets a custom [nastro.FilterValidator] on the Store.
+// It will be used to validate filters before executing queries.
+func WithFilterValidator(v nastro.FilterValidator) Option {
+	return func(s *Store) error {
+		s.validateFilter = v
+		return nil
+	}
+}
+
+// WithEventValidator sets a custom [nastro.EventValidator] on the Store.
+// It will be used to validate events before inserting them into the database.
+func WithEventValidator(v nastro.EventValidator) Option {
+	return func(s *Store) error {
+		s.validateEvent = v
+		return nil
+	}
 }
 
 // New returns an ephemeral store with the provided capacity.
-func New(capacity int) *Store {
-	return &Store{
-		events:   make([]*nostr.Event, capacity),
-		capacity: capacity,
+func New(opts ...Option) (*Store, error) {
+	store := &Store{
+		events:         make([]*nostr.Event, DefaultCapacity),
+		capacity:       DefaultCapacity,
+		validateEvent:  func(e *nostr.Event) error { return nil },
+		validateFilter: func(f ...nostr.Filter) error { return nil },
 	}
+
+	for _, opt := range opts {
+		if err := opt(store); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
 }
 
 // Size returns the number of events currently stored.
@@ -145,19 +192,9 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 }
 
 func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Event, error) {
-	if len(filters) == 0 {
+	expected := s.expectedResults(filters...)
+	if expected == 0 {
 		return nil, nil
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var expected int
-	for i := range filters {
-		if filters[i].Limit == 0 {
-			expected = s.capacity
-		}
-		expected += filters[i].Limit
 	}
 	events := make([]nostr.Event, 0, expected)
 
@@ -176,6 +213,23 @@ func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Eve
 	// sort events in descending order by their CreatedAt
 	slices.SortFunc(events, func(e1, e2 nostr.Event) int { return cmp.Compare(e2.CreatedAt, e1.CreatedAt) })
 	return events, nil
+}
+
+func (s *Store) expectedResults(filters ...nostr.Filter) int {
+	var expected int
+	for _, f := range filters {
+		if f.LimitZero {
+			continue
+		}
+
+		if f.Limit < 1 {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			return s.capacity
+		}
+		expected += f.Limit
+	}
+	return expected
 }
 
 func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, error) {
