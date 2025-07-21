@@ -11,6 +11,7 @@ var (
 	ErrInvalidReplacement = errors.New("called Replace on a non-replaceable event")
 	ErrInternalQuery      = errors.New("internal query error")
 	ErrUnspecifiedLimit   = errors.New("unspecified filter's limit")
+	ErrUnsupportedSearch  = errors.New("NIP-50 search is not supported")
 )
 
 type Store interface {
@@ -57,6 +58,10 @@ type EventPolicy func(*nostr.Event) error
 func DefaultFilterPolicy(filters ...nostr.Filter) (nostr.Filters, error) {
 	result := make([]nostr.Filter, 0, len(filters))
 	for _, f := range filters {
+		if f.Search != "" {
+			return nil, ErrUnsupportedSearch
+		}
+
 		if !f.LimitZero {
 			if f.Limit < 1 {
 				return nil, ErrUnspecifiedLimit
