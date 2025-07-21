@@ -1,5 +1,5 @@
 # nastro
-A collection of plug&play but highly configurable databases for Nostr.
+A collection of plug&play, yet highly configurable databases for Nostr.
 
 ## Installation
 
@@ -25,30 +25,24 @@ type Store interface {
 }
 ```
 
-## Structural Customization
+## Deep Customization
 
-Fine-tune core parameters and even add custom schemas and query builders with functional options:
+`nastro` is designed to be minimal by default, but easily extended to fit your needs.  
+You can fine-tune both structure and behavior through functional options:
 
 ```golang
 store, err := sqlite.New("relay.sqlite",
-    sqlite.WithQueryLimits(limits),
-    sqlite.WithAdditionalSchema(schema),
+	sqlite.WithAdditionalSchema(mySchema),    	// custom tables or indexes
+	sqlite.WithQueryBuilder(myBuilder),     	// override default SQL generation
+	sqlite.WithFilterPolicy(myPolicy),     		// sanitize or reject filters
 )
 ```
 
-## Behavioral Customization
-
-You can also use your custom query builder only for specific queries, or writing your own functions
-having access the the SQL client.
-
-```golang
-rows, err := store.DB.QueryContext(ctx, myQuery, myArgs...)
-```
+This setup provides clean separation between core logic and custom rules, so you can adapt behavior without forking or modifying internals.
 
 ## Requirements for Databases
 
 These are the new requirements for new databases to be added to `nastro`:
-- fullfil the `Store` interface.
-- apply `QueryLimits` and `WriteLimits` in the `Query`, `Save` and `Replace` methods respectively.
-- expose the underlying database client (if any).
-- allow customization of core parameters, schemas and query builders with functional options.
+1. fullfil the `Store` interface.
+2. expose the underlying database client (if any).
+3. allow customization of `EventPolicy`, `FilterPolicy` and other parameters with functional options.
