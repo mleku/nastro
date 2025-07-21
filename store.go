@@ -42,30 +42,29 @@ type Store interface {
 	Count(ctx context.Context, filters ...nostr.Filter) (int64, error)
 }
 
-// FilterValidator validates one or more nostr filters before executing a query.
-type FilterValidator func(...nostr.Filter) error
+// FilterPolicy sanitizes a list of filters before building a query.
+// It returns a potentially modified list and an error if the input is invalid.
+type FilterPolicy func(...nostr.Filter) (nostr.Filters, error)
 
-func DefaultFilterValidator(filters ...nostr.Filter) error {
-	for _, f := range filters {
-		if !f.LimitZero && f.Limit < 1 {
-			return ErrUnspecifiedLimit
-		}
-	}
-	return nil
-}
+// EventPolicy validates a nostr event before it's written to the store.
+type EventPolicy func(*nostr.Event) error
 
-// EventValidator validates an event before writing it into the store.
-type EventValidator func(*nostr.Event) error
-
-// RemoveZeros removes filters with LimitZero set to true.
-func RemoveZeros(filters []nostr.Filter) []nostr.Filter {
+// DefaultFilterPolicy is a basic filter policy that enforces two rules:
+//  1. Filters with LimitZero set are ignored (i.e., removed).
+//  2. Remaining filters must have a Limit > 0, otherwise an error is returned.
+//
+// It returns the cleaned list of filters or an error if any filter is invalid.
+func DefaultFilterPolicy(filters ...nostr.Filter) (nostr.Filters, error) {
 	result := make([]nostr.Filter, 0, len(filters))
 	for _, f := range filters {
 		if !f.LimitZero {
+			if f.Limit < 1 {
+				return nil, ErrUnspecifiedLimit
+			}
 			result = append(result, f)
 		}
 	}
-	return result
+	return result, nil
 }
 
 func IsValidReplacement(kind int) bool {

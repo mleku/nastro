@@ -28,8 +28,8 @@ type Store struct {
 	write    int
 	capacity int
 
-	validateEvent  nastro.EventValidator
-	validateFilter nastro.FilterValidator
+	validateEvent   nastro.EventPolicy
+	sanitizeFilters nastro.FilterPolicy
 }
 
 type Option func(*Store) error
@@ -46,18 +46,18 @@ func WithCapacity(n int) Option {
 	}
 }
 
-// WithFilterValidator sets a custom [nastro.FilterValidator] on the Store.
-// It will be used to validate filters before executing queries.
-func WithFilterValidator(v nastro.FilterValidator) Option {
+// WithFilterPolicy sets a custom [nastro.FilterPolicy] on the Store.
+// It will be used to validate and modify filters before executing queries.
+func WithFilterPolicy(v nastro.FilterPolicy) Option {
 	return func(s *Store) error {
-		s.validateFilter = v
+		s.sanitizeFilters = v
 		return nil
 	}
 }
 
-// WithEventValidator sets a custom [nastro.EventValidator] on the Store.
+// WithEventPolicy sets a custom [nastro.EventPolicy] on the Store.
 // It will be used to validate events before inserting them into the database.
-func WithEventValidator(v nastro.EventValidator) Option {
+func WithEventPolicy(v nastro.EventPolicy) Option {
 	return func(s *Store) error {
 		s.validateEvent = v
 		return nil
@@ -67,10 +67,10 @@ func WithEventValidator(v nastro.EventValidator) Option {
 // New returns an ephemeral store with the provided capacity.
 func New(opts ...Option) (*Store, error) {
 	store := &Store{
-		events:         make([]*nostr.Event, DefaultCapacity),
-		capacity:       DefaultCapacity,
-		validateEvent:  func(e *nostr.Event) error { return nil },
-		validateFilter: func(f ...nostr.Filter) error { return nil },
+		events:          make([]*nostr.Event, DefaultCapacity),
+		capacity:        DefaultCapacity,
+		validateEvent:   func(*nostr.Event) error { return nil },
+		sanitizeFilters: func(...nostr.Filter) (nostr.Filters, error) { return nil, nil },
 	}
 
 	for _, opt := range opts {
@@ -129,6 +129,10 @@ func (s *Store) Save(ctx context.Context, event *nostr.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.validateEvent(event); err != nil {
+		return err
+	}
+
 	s.events[s.write] = event
 	s.write = (s.write + 1) % s.capacity
 	return nil
@@ -141,6 +145,10 @@ func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := s.validateEvent(event); err != nil {
+		return false, err
+	}
 
 	for i, stored := range s.events {
 		if stored == nil {
@@ -192,20 +200,21 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 }
 
 func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Event, error) {
-	expected := s.expectedResults(filters...)
-	if expected == 0 {
-		return nil, nil
+	filters, err := s.sanitizeFilters(filters...)
+	if err != nil {
+		return nil, err
 	}
-	events := make([]nostr.Event, 0, expected)
 
-	for _, filter := range filters {
-		for _, event := range s.events {
-			if filter.Limit > 0 && len(events) >= filter.Limit {
-				break
-			}
+	var events []nostr.Event
+	for _, event := range s.events {
+		if event == nil {
+			continue
+		}
 
-			if event != nil && filter.Matches(event) {
+		for i := range filters {
+			if filters[i].Matches(event) {
 				events = append(events, *event)
+				break
 			}
 		}
 	}
@@ -213,23 +222,6 @@ func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Eve
 	// sort events in descending order by their CreatedAt
 	slices.SortFunc(events, func(e1, e2 nostr.Event) int { return cmp.Compare(e2.CreatedAt, e1.CreatedAt) })
 	return events, nil
-}
-
-func (s *Store) expectedResults(filters ...nostr.Filter) int {
-	var expected int
-	for _, f := range filters {
-		if f.LimitZero {
-			continue
-		}
-
-		if f.Limit < 1 {
-			s.mu.RLock()
-			defer s.mu.RUnlock()
-			return s.capacity
-		}
-		expected += f.Limit
-	}
-	return expected
 }
 
 func (s *Store) Count(ctx context.Context, filters ...nostr.Filter) (int64, error) {

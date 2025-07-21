@@ -58,8 +58,8 @@ type Store struct {
 	*sql.DB
 	retries int // the maximum number of retries after a write failure "database is locked"
 
-	validateFilter nastro.FilterValidator
-	validateEvent  nastro.EventValidator
+	sanitizeFilters nastro.FilterPolicy
+	validateEvent   nastro.EventPolicy
 
 	queryBuilder QueryBuilder
 	countBuilder QueryBuilder
@@ -94,18 +94,18 @@ func WithRetries(n int) Option {
 	}
 }
 
-// WithFilterValidator sets a custom [nastro.FilterValidator] on the Store.
-// It will be used to validate filters before executing queries.
-func WithFilterValidator(v nastro.FilterValidator) Option {
+// WithFilterPolicy sets a custom [nastro.FilterPolicy] on the Store.
+// It will be used to validate and modify filters before executing queries.
+func WithFilterPolicy(v nastro.FilterPolicy) Option {
 	return func(s *Store) error {
-		s.validateFilter = v
+		s.sanitizeFilters = v
 		return nil
 	}
 }
 
-// WithEventValidator sets a custom [nastro.EventValidator] on the Store.
+// WithEventPolicy sets a custom [nastro.EventPolicy] on the Store.
 // It will be used to validate events before inserting them into the database.
-func WithEventValidator(v nastro.EventValidator) Option {
+func WithEventPolicy(v nastro.EventPolicy) Option {
 	return func(s *Store) error {
 		s.validateEvent = v
 		return nil
@@ -156,11 +156,11 @@ func New(URL string, opts ...Option) (*Store, error) {
 	}
 
 	store := &Store{
-		DB:             DB,
-		validateFilter: nastro.DefaultFilterValidator,
-		validateEvent:  func(e *nostr.Event) error { return nil },
-		queryBuilder:   DefaultQueryBuilder,
-		countBuilder:   DefaultCountBuilder,
+		DB:              DB,
+		sanitizeFilters: nastro.DefaultFilterPolicy,
+		validateEvent:   func(e *nostr.Event) error { return nil },
+		queryBuilder:    DefaultQueryBuilder,
+		countBuilder:    DefaultCountBuilder,
 	}
 
 	for _, opt := range opts {
@@ -320,7 +320,8 @@ func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Eve
 
 // QueryWithBuilder generates an sqlite query for the filters with the provided [QueryBuilder], and executes it.
 func (s *Store) QueryWithBuilder(ctx context.Context, build QueryBuilder, filters ...nostr.Filter) ([]nostr.Event, error) {
-	if err := s.validateFilter(filters...); err != nil {
+	filters, err := s.sanitizeFilters(filters...)
+	if err != nil {
 		return nil, err
 	}
 
@@ -383,7 +384,6 @@ func (s *Store) CountWithBuilder(ctx context.Context, build QueryBuilder, filter
 }
 
 func DefaultQueryBuilder(filters ...nostr.Filter) ([]Query, error) {
-	filters = nastro.RemoveZeros(filters)
 	switch len(filters) {
 	case 0:
 		return nil, nil
@@ -414,7 +414,6 @@ func DefaultQueryBuilder(filters ...nostr.Filter) ([]Query, error) {
 }
 
 func DefaultCountBuilder(filters ...nostr.Filter) ([]Query, error) {
-	filters = nastro.RemoveZeros(filters)
 	switch len(filters) {
 	case 0:
 		return nil, nil
