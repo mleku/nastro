@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/pippellia-btc/nastro"
 )
 
 var (
@@ -30,7 +31,7 @@ func TestSave(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := store.Query(ctx, nostr.Filter{Tags: nostr.TagMap{"d": []string{"test-tag"}}})
+	res, err := store.Query(ctx, nostr.Filter{Tags: nostr.TagMap{"d": []string{"test-tag"}}, Limit: 1})
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
@@ -90,7 +91,7 @@ func TestReplace(t *testing.T) {
 				t.Fatalf("expected stored %v, got %v", test.expectedStored, stored)
 			}
 
-			res, err := store.Query(ctx, nostr.Filter{IDs: []string{test.stored.ID, test.new.ID}})
+			res, err := store.Query(ctx, nostr.Filter{IDs: []string{test.stored.ID, test.new.ID}, Limit: 1})
 			if err != nil {
 				t.Fatalf("failed to query: %v", err)
 			}
@@ -254,6 +255,10 @@ func TestDefaultCountBuilder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInterface(t *testing.T) {
+	var _ nastro.Store = &Store{}
 }
 
 func Remove(URL string) {

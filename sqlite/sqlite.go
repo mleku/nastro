@@ -52,23 +52,22 @@ const schema = `
 		LIMIT 1;
 	END;`
 
-// Store of Nostr events store that uses an sqlite3 database.
-// It embeds the *sql.DB connection for direct interaction and manages
-// configurable limits and query building.
+// Store of Nostr events that uses an sqlite3 database.
+// It embeds the *sql.DB connection for direct interaction and manages optional validators and query builders.
 type Store struct {
 	*sql.DB
 	retries int // the maximum number of retries after a write failure "database is locked"
 
+	validateFilter nastro.FilterValidator
+	validateEvent  nastro.EventValidator
+
 	queryBuilder QueryBuilder
 	countBuilder QueryBuilder
-
-	queryLimits nastro.QueryLimits
-	writeLimits nastro.WriteLimits
 }
 
 // QueryBuilder converts multiple nostr filters into one or more sqlite queries and lists of arguments.
-// Filters passed to the query builder have been previously validated by [nastro.QueryLimits]
 // Not all filters can be combined into a single query, but many can.
+// Filters passed to the query builder have been previously validated by [nastro.QueryLimits] (if specified).
 //
 // It's useful to specify custom query/count builders to leverage additional schemas that have been
 // provided in the [New] constructor.
@@ -91,6 +90,24 @@ func WithRetries(n int) Option {
 			return errors.New("number of retries must be non-negative")
 		}
 		s.retries = n
+		return nil
+	}
+}
+
+// WithFilterValidator sets a custom [nastro.FilterValidator] on the Store.
+// It will be used to validate filters before executing queries.
+func WithFilterValidator(v nastro.FilterValidator) Option {
+	return func(s *Store) error {
+		s.validateFilter = v
+		return nil
+	}
+}
+
+// WithEventValidator sets a custom [nastro.EventValidator] on the Store.
+// It will be used to validate events before inserting them into the database.
+func WithEventValidator(v nastro.EventValidator) Option {
+	return func(s *Store) error {
+		s.validateEvent = v
 		return nil
 	}
 }
@@ -122,22 +139,6 @@ func WithAdditionalSchema(schema string) Option {
 	}
 }
 
-// WithQueryLimits allows to specify the [nastro.QueryLimits] used to validate the filters before executing a query.
-func WithQueryLimits(q nastro.QueryLimits) Option {
-	return func(s *Store) error {
-		s.queryLimits = q
-		return nil
-	}
-}
-
-// WithWriteLimits allows to specify the [nastro.WriteLimits] used to validate events before writing them.
-func WithWriteLimits(w nastro.WriteLimits) Option {
-	return func(s *Store) error {
-		s.writeLimits = w
-		return nil
-	}
-}
-
 // New returns an sqlite3 store connected to the sqlite file located at the URL,
 // after applying the base schema, and the provided options.
 func New(URL string, opts ...Option) (*Store, error) {
@@ -155,13 +156,11 @@ func New(URL string, opts ...Option) (*Store, error) {
 	}
 
 	store := &Store{
-		DB:      DB,
-		retries: 0,
-
-		queryBuilder: DefaultQueryBuilder,
-		countBuilder: DefaultCountBuilder,
-		queryLimits:  nastro.NewQueryLimits(),
-		writeLimits:  nastro.NewWriteLimits(),
+		DB:             DB,
+		validateFilter: nastro.DefaultFilterValidator,
+		validateEvent:  func(e *nostr.Event) error { return nil },
+		queryBuilder:   DefaultQueryBuilder,
+		countBuilder:   DefaultCountBuilder,
 	}
 
 	for _, opt := range opts {
@@ -201,7 +200,7 @@ func (s *Store) withRetries(op func() error) error {
 }
 
 func (s *Store) Save(ctx context.Context, e *nostr.Event) error {
-	if err := s.writeLimits.Validate(e); err != nil {
+	if err := s.validateEvent(e); err != nil {
 		return err
 	}
 
@@ -235,7 +234,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 }
 
 func (s *Store) Replace(ctx context.Context, event *nostr.Event) (bool, error) {
-	if err := s.writeLimits.Validate(event); err != nil {
+	if err := s.validateEvent(event); err != nil {
 		return false, err
 	}
 
@@ -320,17 +319,17 @@ func (s *Store) Query(ctx context.Context, filters ...nostr.Filter) ([]nostr.Eve
 }
 
 // QueryWithBuilder generates an sqlite query for the filters with the provided [QueryBuilder], and executes it.
-func (s *Store) QueryWithBuilder(ctx context.Context, builder QueryBuilder, filters ...nostr.Filter) ([]nostr.Event, error) {
-	if err := s.queryLimits.Validate(filters...); err != nil {
+func (s *Store) QueryWithBuilder(ctx context.Context, build QueryBuilder, filters ...nostr.Filter) ([]nostr.Event, error) {
+	if err := s.validateFilter(filters...); err != nil {
 		return nil, err
 	}
 
-	queries, err := builder(filters...)
+	queries, err := build(filters...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build query: %w", err)
 	}
 
-	events := make([]nostr.Event, 0, s.queryLimits.MaxLimit)
+	var events []nostr.Event
 	for i, query := range queries {
 		rows, err := s.DB.QueryContext(ctx, query.SQL, query.Args...)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -384,9 +383,10 @@ func (s *Store) CountWithBuilder(ctx context.Context, builder QueryBuilder, filt
 }
 
 func DefaultQueryBuilder(filters ...nostr.Filter) ([]Query, error) {
+	filters = nastro.RemoveZeros(filters)
 	switch len(filters) {
 	case 0:
-		return nil, nastro.ErrEmptyFilters
+		return nil, nil
 
 	case 1:
 		query, args := buildQuery(filters[0])
@@ -414,9 +414,10 @@ func DefaultQueryBuilder(filters ...nostr.Filter) ([]Query, error) {
 }
 
 func DefaultCountBuilder(filters ...nostr.Filter) ([]Query, error) {
+	filters = nastro.RemoveZeros(filters)
 	switch len(filters) {
 	case 0:
-		return nil, nastro.ErrEmptyFilters
+		return nil, nil
 
 	case 1:
 		query, args := buildCount(filters[0])

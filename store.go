@@ -3,24 +3,14 @@ package nastro
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/nbd-wtf/go-nostr"
 )
 
 var (
-	ErrTooManyEventTags    = errors.New("too many tags in event")
-	ErrTooMuchEventContent = errors.New("event content is too big")
-
-	ErrEmptyFilters         = errors.New("filters slice cannot be empty")
-	ErrEmptyFilter          = errors.New("filter must specify at least one ID, kind, author, tag, or time range")
-	ErrTooManyFilterIDs     = errors.New("too many IDs in filters")
-	ErrTooManyFilterAuthors = errors.New("too many authors in filters")
-	ErrTooManyFilterKinds   = errors.New("too many kinds in filters")
-	ErrTooManyFilterTags    = errors.New("too many tags in filters")
-
 	ErrInvalidReplacement = errors.New("called Replace on a non-replaceable event")
 	ErrInternalQuery      = errors.New("internal query error")
+	ErrUnspecifiedLimit   = errors.New("unspecified filter's limit")
 )
 
 type Store interface {
@@ -52,92 +42,32 @@ type Store interface {
 	Count(ctx context.Context, filters ...nostr.Filter) (int64, error)
 }
 
-// QueryLimits protects the database from queries (not counts) that are too expensive.
-type QueryLimits struct {
-	MaxIDs     int
-	MaxKinds   int
-	MaxAuthors int
-	MaxTags    int
-	MaxLimit   int
-}
+// FilterValidator validates one or more nostr filters before executing a query.
+type FilterValidator func(...nostr.Filter) error
 
-func NewQueryLimits() QueryLimits {
-	return QueryLimits{
-		MaxIDs:     500,
-		MaxKinds:   50,
-		MaxAuthors: 500,
-		MaxTags:    25,
-		MaxLimit:   5000,
-	}
-}
-
-// Validate returns an error if the filters breaks any of the [QueryLimits].
-// It modifies the filter.Limit if unset or too big.
-func (q QueryLimits) Validate(filters ...nostr.Filter) error {
-	if len(filters) == 0 {
-		return ErrEmptyFilters
-	}
-
-	var IDs, kinds, authors, tags int
-	for i := range filters {
-		if IsEmptyFilter(filters[i]) {
-			return fmt.Errorf("filters[%d]: %w", i, ErrEmptyFilter)
+func DefaultFilterValidator(filters ...nostr.Filter) error {
+	for _, f := range filters {
+		if !f.LimitZero && f.Limit < 1 {
+			return ErrUnspecifiedLimit
 		}
-
-		if filters[i].Limit < 1 || filters[i].Limit > q.MaxLimit/len(filters) {
-			filters[i].Limit = q.MaxLimit / len(filters)
-		}
-
-		IDs += len(filters[i].IDs)
-		kinds += len(filters[i].Kinds)
-		authors += len(filters[i].Authors)
-		tags += len(filters[i].Tags)
-	}
-
-	if IDs > q.MaxIDs {
-		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterIDs, IDs, q.MaxIDs)
-	}
-	if kinds > q.MaxKinds {
-		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterKinds, kinds, q.MaxKinds)
-	}
-	if authors > q.MaxAuthors {
-		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterAuthors, authors, q.MaxAuthors)
-	}
-	if tags > q.MaxTags {
-		return fmt.Errorf("%w: %d, max %d", ErrTooManyFilterTags, tags, q.MaxTags)
 	}
 	return nil
 }
 
-// WriteLimits protects the database from saves or replaces that are too expensive.
-type WriteLimits struct {
-	MaxTags          int
-	MaxContentLenght int
-}
+// EventValidator validates an event before writing it into the store.
+type EventValidator func(*nostr.Event) error
 
-func NewWriteLimits() WriteLimits {
-	return WriteLimits{
-		MaxTags:          20000,
-		MaxContentLenght: 100000,
+// RemoveZeros removes filters with LimitZero set to true.
+func RemoveZeros(filters []nostr.Filter) []nostr.Filter {
+	result := make([]nostr.Filter, 0, len(filters))
+	for _, f := range filters {
+		if !f.LimitZero {
+			result = append(result, f)
+		}
 	}
-}
-
-// Validate returns an error if the event breaks any of the [WriteLimits].
-func (w WriteLimits) Validate(event *nostr.Event) error {
-	if len(event.Tags) > w.MaxTags {
-		return fmt.Errorf("%w: %d, max %d", ErrTooManyEventTags, len(event.Tags), w.MaxTags)
-	}
-
-	if len(event.Content) > w.MaxContentLenght {
-		return fmt.Errorf("%w: %d, max %d", ErrTooMuchEventContent, len(event.Content), w.MaxContentLenght)
-	}
-	return nil
+	return result
 }
 
 func IsValidReplacement(kind int) bool {
 	return nostr.IsReplaceableKind(kind) || nostr.IsAddressableKind(kind)
-}
-
-func IsEmptyFilter(f nostr.Filter) bool {
-	return len(f.IDs) == 0 && len(f.Kinds) == 0 && len(f.Authors) == 0 && len(f.Tags) == 0 && f.Since == nil && f.Until == nil
 }
