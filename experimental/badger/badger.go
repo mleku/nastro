@@ -49,7 +49,8 @@ func WithEventPolicy(v nastro.EventPolicy) Option {
 	}
 }
 
-// New returns an ephemeral store with the provided capacity.
+// New returns a badger-based store located at the provided path,
+// after applying the provided options.
 func New(ctx context.Context, path string, opts ...Option) (
 	s *Store, err error,
 ) {
@@ -58,13 +59,9 @@ func New(ctx context.Context, path string, opts ...Option) (
 		return
 	}
 	s = &Store{
-		D:             db,
-		validateEvent: func(*nostr.Event) error { return nil },
-		sanitizeFilters: func(...nostr.Filter) (
-			nostr.Filters, error,
-		) {
-			return nil, nil
-		},
+		D:               db,
+		validateEvent:   func(*nostr.Event) error { return nil },
+		sanitizeFilters: nastro.DefaultFilterPolicy,
 	}
 
 	for _, opt := range opts {
