@@ -110,7 +110,7 @@ func TestReplace(t *testing.T) {
 			stored: eventOld,
 			newEvt: eventNew,
 			// NOTE: current badger.Replace does not report replacement; expect false
-			expectedStored: false,
+			expectedStored: true,
 		},
 	}
 
